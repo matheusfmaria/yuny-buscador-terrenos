@@ -1913,6 +1913,12 @@ function mesclarPacoteDistrito(pacote){
   // vira uma "composição" de 1 lote só.
   if (pacote.edges) Object.assign(GRUPOS_EDGES, pacote.edges);
   if (pacote.zonaLote) Object.assign(ZONA_LOTE, pacote.zonaLote);
+  // Geometria pré-calculada da união dos lotes de cada composição — evita
+  // o cálculo ao vivo via Turf.js em renderQuadraMarkers() (medido: sozinho
+  // isso respondia por a maior parte do tempo de carregamento). Chave
+  // composta bairro::qid, igual GRUPOS_EDGES, pela mesma razão (colisão de
+  // "setor.quadra" entre bairros vizinhos).
+  if (pacote.gruposGeom) Object.assign(GEOM_MAP, pacote.gruposGeom);
   const novasQuadras = pacote.grupos.map(mapearGrupoParaQuadra);
   QUADRAS.push(...novasQuadras);
   return novasQuadras.length;
@@ -4152,7 +4158,6 @@ function scoreColor(score) {
 
 // Mapa id → geometria real do polígono (lookup rápido)
 const GEOM_MAP = {};
-GRUPOS_GEOM.features.forEach(f=>{ GEOM_MAP[f.properties.id]=f.geometry; });
 
 // Converte coordenadas GeoJSON [lon,lat] para o formato Leaflet [lat,lon]
 // usando L.polygon/L.multiPolygon diretamente (sem L.geoJSON) — evita bug
@@ -4173,15 +4178,16 @@ function renderQuadraMarkers() {
   visibleQuadras.forEach(q=>{
     const subs=getSubGroups(q);
     if (!subs.length) return;
-    const geom=GEOM_MAP[q.id];
+    const geom=GEOM_MAP[q.bairro+'::'+q.id];
     const semRestricaoNenhuma = subs.length===1 && subs[0].tipo==='ativo';
 
     if (semRestricaoNenhuma) {
       // Caso normal: nenhum lote restrito — polígono único preciso de sempre.
-      // Prioridade: GRUPOS_GEOM pré-calculado (mais rápido, cobre os 27 bairros
-      // originais). Quando falta — todo distrito carregado sob demanda, hoje
-      // 69 dos 96 — cai pra união ao vivo dos lotes (mesma função já usada pro
-      // caso de restrição), em vez de desenhar um círculo aproximado.
+      // Prioridade: geometria pré-calculada (gruposGeom, vem no próprio
+      // pacote de cada distrito — cobre os 108 distritos agora, não só os
+      // 27 originais). Só cai pra união ao vivo dos lotes se, por algum
+      // motivo, a composição não tiver entrada em GEOM_MAP (não deveria
+      // acontecer, mas mantém o fallback por segurança).
       const c=corComposicao(q.id, scoreColor(subs[0].score));
       const sel=q.id===selectedQid && q.bairro===selectedBairro;
       let layer;
@@ -5342,9 +5348,9 @@ function buildAddressPanel(lat,lon,rua,bairro){
 
   // 1. Encontra grupo cujo polígono real contém o ponto buscado
   let grupoEncontrado=null;
-  for(const feat of GRUPOS_GEOM.features){
-    if(ptInPolygon(lat,lon,feat.geometry)){
-      grupoEncontrado=feat.properties.id;
+  for(const chave in GEOM_MAP){
+    if(ptInPolygon(lat,lon,GEOM_MAP[chave])){
+      grupoEncontrado=chave.split('::')[1] || chave;
       break;
     }
   }
