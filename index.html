@@ -2176,7 +2176,7 @@ function atualizarFiltroNumerico(){
     applyQFilters();
   }, 350);
 }
-let selectedSql=null, selectedQid=null, selectedSubId=null, visibleLotes=[], visibleQuadras=[];
+let selectedSql=null, selectedQid=null, selectedSubId=null, selectedBairro=null, visibleLotes=[], visibleQuadras=[];
 
 // ── LOTES EFETIVOS DA COMPOSIÇÃO (excluindo os marcados com restrição) ─
 function getEffectiveLotes(q) {
@@ -2309,9 +2309,14 @@ function hullLatLngsForSub(sub) {
   return hull.map(p => [p[1], p[0]]);
 }
 // ── FIM SUBDIVISÃO DINÂMICA ─────────────────────────────────────────────
-function findSubById(subId) {
+function findSubById(subId, bairroHint) {
   const parentId = subId.split('~')[0];
-  const q = QUADRAS.find(x=>x.id===parentId);
+  // Setor.quadra pode colidir entre bairros vizinhos (mesma numeração fiscal,
+  // locais diferentes) — sem o bairro como desambiguador, pega sempre a
+  // primeira ocorrência no array, que pode não ser a certa.
+  const q = bairroHint
+    ? (QUADRAS.find(x=>x.id===parentId && x.bairro===bairroHint) || QUADRAS.find(x=>x.id===parentId))
+    : QUADRAS.find(x=>x.id===parentId);
   if (!q) return null;
   return getSubGroups(q).find(s=>s.subId===subId) || null;
 }
@@ -4140,7 +4145,7 @@ function renderQuadraMarkers() {
       // 69 dos 96 — cai pra união ao vivo dos lotes (mesma função já usada pro
       // caso de restrição), em vez de desenhar um círculo aproximado.
       const c=corComposicao(q.id, scoreColor(subs[0].score));
-      const sel=q.id===selectedQid;
+      const sel=q.id===selectedQid && q.bairro===selectedBairro;
       let layer;
       if(geom){
         const latlngs=geomToLatLngs(geom);
@@ -4161,8 +4166,13 @@ function renderQuadraMarkers() {
       }
       layer._yunyTipo = (geom || layer instanceof L.Polygon) ? 'poligono' : 'circulo';
       layer._yunySubId = q.id;
+      layer._yunyBairro = q.bairro;
       layers.quadras.addLayer(layer);
-      quadraPolygons[q.id]=layer;
+      // Chave composta (bairro+id) — setor.quadra pode se repetir em bairros
+      // vizinhos (mesma numeração fiscal, locais diferentes de verdade); sem
+      // o bairro, a segunda sobrescrevia a primeira no dicionário e um clique
+      // na área da primeira resolvia pro polígono (e ficha) da segunda.
+      quadraPolygons[q.bairro+'::'+q.id]=layer;
       return;
     }
 
@@ -4174,7 +4184,7 @@ function renderQuadraMarkers() {
       if (!subPassaFiltrosNumericos(q, sub)) return;
       const restrito = sub.tipo==='restrito';
       const c = corComposicao(sub.subId, restrito ? corComposicaoRestrita(qidBase, sub.lotes) : scoreColor(sub.score));
-      const sel=q.id===selectedQid && sub.subId===selectedSubId;
+      const sel=q.id===selectedQid && sub.subId===selectedSubId && q.bairro===selectedBairro;
       const unioned = unionLotesPolygonCached(qidBase, sub.lotes);
       const latlngs = geoJSONToLatLngs(unioned);
       if (!latlngs.length) return;
@@ -4182,8 +4192,9 @@ function renderQuadraMarkers() {
       const layer = L.polygon(latlngs, style);
       layer._yunyTipo = 'poligono';
       layer._yunySubId = sub.subId;
+      layer._yunyBairro = q.bairro;
       layer.addTo(layers.quadras);
-      quadraPolygons[sub.subId]=layer;
+      quadraPolygons[q.bairro+'::'+sub.subId]=layer;
     });
   });
 }
@@ -4207,10 +4218,10 @@ function renderQuadraList() {
   const sorted=cards.sort(sortFns[sortBy]||sortFns.area).slice(0,80);
   if(!sorted.length){el.innerHTML='<div style="padding:20px;text-align:center;color:#aaa;font-size:13px">Nenhuma quadra.</div>';return;}
   el.innerHTML=sorted.map(({q,sub})=>{
-    const sel = q.id===selectedQid && sub.subId===selectedSubId;
+    const sel = q.id===selectedQid && sub.subId===selectedSubId && q.bairro===selectedBairro;
     const restrito = sub.tipo==='restrito';
     return `
-    <div class="qcard ${sel?'sel':''}" onclick="selectQuadra('${q.id}','${sub.subId}')" style="${restrito?'opacity:0.75':''}">
+    <div class="qcard ${sel?'sel':''}" onclick="selectQuadra('${q.id}','${sub.subId}',false,'${q.bairro.replace(/'/g,"\\'")}')" style="${restrito?'opacity:0.75':''}">
       <div class="card-top">
         <span class="card-id">Quadra ${sub.subId}${PROSPECCAO_STATUS_CACHE[sub.subId]?' <span class="badge-prospeccao">📧 Prospecção</span>':''}${sub.dividido?(restrito?` <span style="font-size:9px;background:${corComposicaoRestrita(sub.parentId.split('-')[0],sub.lotes)};color:#fff;border-radius:3px;padding:1px 5px">${LABEL_RESTRICAO[sub.statusRestricao]||'restrito'}</span>`:` <span style="font-size:9px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 5px">parte ${sub.subId.split('~')[1]}</span>`):''}</span>
         <span class="area-big">${(sub.area/1000).toFixed(1)}k m²</span>
@@ -4745,23 +4756,32 @@ function selectLote(sql){
   renderLoteList();
 }
 
-function selectQuadra(qid, subId, manterView){
+function selectQuadra(qid, subId, manterView, bairroHint){
   selectedQid=qid; selectedSql=null;
-  const q=QUADRAS.find(x=>x.id===qid); if(!q) return;
+  // Setor.quadra pode se repetir em bairros vizinhos — sem o bairro como
+  // desambiguador, .find() pega sempre a primeira ocorrência no array,
+  // que pode ser uma quadra diferente da que o usuário quis abrir.
+  const q = bairroHint
+    ? (QUADRAS.find(x=>x.id===qid && x.bairro===bairroHint) || QUADRAS.find(x=>x.id===qid))
+    : QUADRAS.find(x=>x.id===qid);
+  if(!q) return;
   const subs = getSubGroups(q);
   if (subs.length===0) { closeDetail(); return; } // todos os lotes restritos, nada a mostrar
   const activeSub = subs.find(s=>s.subId===subId) || subs[0];
   selectedSubId = activeSub.subId;
+  selectedBairro = q.bairro;
   const _stats = activeSub; // {area, n, score, vgv, lotes, subId, dividido}
   const isCompactoQ = currentProfile==='compacto';
   const dispPrecoQ = isCompactoQ ? (q.precoLocalCompacto||VGV_PRECO[q.bairro]||14000) : (q.precoLocal||VGV_PRECO[q.bairro]||14000);
   const dispPctQ = isCompactoQ ? q.pctVendidoCompacto : q.pctVendido;
   const dispFonteQ = isCompactoQ ? q.precoFonteCompacto : q.precoFonte;
-  Object.entries(quadraPolygons).forEach(([key,layer])=>{
-    const st=findSubById(key);
+  Object.values(quadraPolygons).forEach(layer=>{
+    // usa os dados gravados no próprio layer (subId + bairro), não a chave
+    // do dicionário, que agora é composta só pra evitar sobrescrita
+    const st=findSubById(layer._yunySubId, layer._yunyBairro);
     if (st) {
-      const _c= corComposicao(key, st.tipo==='restrito' ? corComposicaoRestrita(st.parentId.split('-')[0], st.lotes) : scoreColor(st.score));
-      const _sel=key===selectedSubId;
+      const _c= corComposicao(layer._yunySubId, st.tipo==='restrito' ? corComposicaoRestrita(st.parentId.split('-')[0], st.lotes) : scoreColor(st.score));
+      const _sel = layer._yunySubId===selectedSubId && layer._yunyBairro===q.bairro;
       const _style={color:_c,weight:_sel?2.5:1.5,fillColor:_c,fillOpacity:_sel?0.55:0.3,dashArray:_sel?null:'3,2'};
       if(layer.setStyle) layer.setStyle(_style);
     }
@@ -4771,7 +4791,7 @@ function selectQuadra(qid, subId, manterView){
   // de salvar uma restrição/observação" passam manterView=true pra não dar
   // zoom out toda vez que o usuário só quis marcar um status.
   if (!manterView) {
-    const _sel_layer=quadraPolygons[selectedSubId] || quadraPolygons[qid];
+    const _sel_layer=quadraPolygons[q.bairro+'::'+selectedSubId] || quadraPolygons[q.bairro+'::'+qid];
     if(_sel_layer && _sel_layer.getBounds){
       try { map.fitBounds(_sel_layer.getBounds(), {maxZoom:17, padding:[50,50]}); }
       catch(e){ map.panTo([q.lat,q.lon]); }
@@ -5211,7 +5231,7 @@ function candidatosNoClique(e){
       } else {
         dentro = pontoDentroPoligonoLeaflet(e.latlng, layer.getLatLngs());
       }
-      if (dentro) candidatos.push({tipo:'composicao', subId: layer._yunySubId, label:`Quadra ${layer._yunySubId}`});
+      if (dentro) candidatos.push({tipo:'composicao', subId: layer._yunySubId, bairro: layer._yunyBairro, label:`Quadra ${layer._yunySubId} (${layer._yunyBairro})`});
     });
   }
   return candidatos;
@@ -5225,7 +5245,7 @@ function resolverEscolhaSobreposicao(i, latlng){
   if (c.tipo==='empreendimento') abrirPopupEmpreendimento(c.idx, latlng);
   else if (c.tipo==='itbi') abrirCandidatoItbi(c.pontos, latlng);
   else if (c.tipo==='lote') abrirPopupLote(c.sql, c.groupId, latlng);
-  else selectQuadra(c.subId.split('~')[0], c.subId);
+  else selectQuadra(c.subId.split('~')[0], c.subId, false, c.bairro);
 }
 
 // Ponto de ITBI: se só tem 1 transação, popup simples; se tem mais de
@@ -5252,7 +5272,7 @@ map.on('click', function(e){
     if (c.tipo==='empreendimento') abrirPopupEmpreendimento(c.idx, e.latlng);
     else if (c.tipo==='itbi') abrirCandidatoItbi(c.pontos, e.latlng);
     else if (c.tipo==='lote') abrirPopupLote(c.sql, c.groupId, e.latlng);
-    else selectQuadra(c.subId.split('~')[0], c.subId);
+    else selectQuadra(c.subId.split('~')[0], c.subId, false, c.bairro);
     return;
   }
   window._candidatosSobrepostos = candidatos;
