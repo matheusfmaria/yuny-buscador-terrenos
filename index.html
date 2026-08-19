@@ -2213,7 +2213,7 @@ function getSubGroups(q) {
 
   let subsAtivos = [];
   if (efetivos.length > 0) {
-    const edges = GRUPOS_EDGES[q.id] || [];
+    const edges = GRUPOS_EDGES[q.bairro+'::'+q.id] || [];
     const efetivosSet = new Set(efetivos);
     const adj = {};
     efetivos.forEach(l => { adj[l] = new Set(); });
