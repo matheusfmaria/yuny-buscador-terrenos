@@ -782,6 +782,13 @@ const ITBI_COMPARAVEIS=[];
 const Q14_LOTE={};
 const AVAL_COEF={"sem_area":{"elast_ref":0.6935,"elast_area":0.0,"efeito_zona":{"Praça/Canteiro":0.0,"ZC":0.0165,"ZC-ZEIS":-0.0786,"ZCOR-1":-0.1272,"ZCOR-2":-0.0759,"ZCOR-3":-0.2514,"ZCORa":0.1394,"ZCa":0.0027,"ZDE-1":0.1257,"ZDE-2":-0.0398,"ZEIS-1":-0.0078,"ZEIS-2":-0.2298,"ZEIS-3":0.0464,"ZEIS-4":0.3407,"ZEIS-5":-0.0015,"ZEM":0.1128,"ZEMP":0.0252,"ZEP":-0.4179,"ZER-1":-0.0369,"ZER-2":-0.1396,"ZERa":-0.2852,"ZEU":0.1421,"ZEUP":0.0016,"ZEUPa":-0.0791,"ZEUa":-0.0053,"ZM":0.0336,"ZMIS":0.4165,"ZMISa":0.5874,"ZMa":0.0279,"ZPDS":-0.4019,"ZPR":0.1208},"r2":0.408,"r2_cv":0.4074,"dispersao":0.5441},"com_area":{"elast_ref":0.6704,"elast_area":-0.4109,"efeito_zona":{"Praça/Canteiro":0.0,"ZC":-0.0672,"ZC-ZEIS":-0.1794,"ZCOR-1":0.2075,"ZCOR-2":0.1703,"ZCOR-3":-0.0919,"ZCORa":0.1538,"ZCa":-0.0256,"ZDE-1":-0.0557,"ZDE-2":-0.0433,"ZEIS-1":-0.0789,"ZEIS-2":-0.0358,"ZEIS-3":-0.0727,"ZEIS-4":0.157,"ZEIS-5":-0.0369,"ZEM":0.0403,"ZEMP":-0.0455,"ZEP":-0.2315,"ZER-1":0.2361,"ZER-2":-0.0648,"ZERa":0.0259,"ZEU":0.0817,"ZEUP":-0.088,"ZEUPa":-0.0887,"ZEUa":-0.0232,"ZM":-0.0519,"ZMIS":0.1413,"ZMISa":0.3268,"ZMa":-0.0173,"ZPDS":0.1384,"ZPR":0.089},"r2":0.5124,"r2_cv":0.5119,"dispersao":0.4938},"n_calibragem":71919};
 const GRUPOS_EDGES={};
+// Zona de cada LOTE individual (não da quadra inteira), calculada por
+// point-in-polygon contra o shapefile oficial de zoneamento (Lei
+// 18.177/24). Chave igual a LOTES_AREA/LOTES_GEOM: "<setor.quadra>.<lote>".
+// Existe porque uma mesma quadra pode ter lotes em zonas diferentes quando
+// uma zona estreita (ex: ZCOR-1) corta a quadra ao meio — usar só a zona
+// "da quadra" (centroide) misturava CA/score errado nesses casos.
+const ZONA_LOTE={};
 
 
 // LOTES: [bairro, sql, area, lat, lon, cond, score, sl, zona, ou]
@@ -1905,6 +1912,7 @@ function mesclarPacoteDistrito(pacote){
   // Sem os edges, getSubGroups() não acha lotes contíguos e cada lote
   // vira uma "composição" de 1 lote só.
   if (pacote.edges) Object.assign(GRUPOS_EDGES, pacote.edges);
+  if (pacote.zonaLote) Object.assign(ZONA_LOTE, pacote.zonaLote);
   const novasQuadras = pacote.grupos.map(mapearGrupoParaQuadra);
   QUADRAS.push(...novasQuadras);
   return novasQuadras.length;
@@ -2179,6 +2187,12 @@ function atualizarFiltroNumerico(){
 let selectedSql=null, selectedQid=null, selectedSubId=null, selectedBairro=null, visibleLotes=[], visibleQuadras=[];
 
 // ── LOTES EFETIVOS DA COMPOSIÇÃO (excluindo os marcados com restrição) ─
+// Zona do lote individual, com fallback pra zona da quadra (centroide)
+// nos poucos casos sem match direto (ex: distrito ainda sem zonaLote
+// recalculado, ou lote numa borda sem cobertura no shapefile).
+function zonaDoLote(qidBase, l, q) {
+  return ZONA_LOTE[`${qidBase}.${l}`] || q.zona;
+}
 function getEffectiveLotes(q) {
   const qidBase = q.id.split('-')[0];
   return q.lotes.filter(l => {
@@ -2215,10 +2229,19 @@ function getSubGroups(q) {
   if (efetivos.length > 0) {
     const edges = GRUPOS_EDGES[q.bairro+'::'+q.id] || [];
     const efetivosSet = new Set(efetivos);
+    // Zona de cada lote efetivo — usada tanto pra decidir adjacência
+    // quanto pra atribuir a zona (única) de cada subgrupo resultante.
+    const zonaPorLote = {};
+    efetivos.forEach(l => { zonaPorLote[l] = zonaDoLote(qidBase, l, q); });
     const adj = {};
     efetivos.forEach(l => { adj[l] = new Set(); });
     edges.forEach(([a,b]) => {
-      if (efetivosSet.has(a) && efetivosSet.has(b)) { adj[a].add(b); adj[b].add(a); }
+      if (!efetivosSet.has(a) || !efetivosSet.has(b)) return;
+      // Não conecta lotes de zonas diferentes — uma composição nunca deve
+      // misturar lotes com zoneamentos diferentes (ex: uma faixa de
+      // ZCOR-1 cortando uma quadra de ZEU ao meio vira duas composições).
+      if (zonaPorLote[a] !== zonaPorLote[b]) return;
+      adj[a].add(b); adj[b].add(a);
     });
 
     const visitado = new Set();
@@ -2238,10 +2261,15 @@ function getSubGroups(q) {
       let area = 0;
       lotes.forEach(l => { area += LOTES_AREA[`${qidBase}.${l}`] || 0; });
       area = Math.round(area);
+      // Homogêneo por construção (adjacência só liga lotes da mesma
+      // zona), então a zona do primeiro lote representa o subgrupo inteiro.
+      const zona = zonaPorLote[lotes[0]];
+      const qz = zona === q.zona ? q : { ...q, zona };
       return {
         parentId: q.id, lotes, area, n: lotes.length,
-        score: getScoreForStats(q, area, lotes.length, lotes),
-        vgv: calcVGVForArea(q, area),
+        zona,
+        score: getScoreForStats(qz, area, lotes.length, lotes),
+        vgv: calcVGVForArea(qz, area),
         tipo: 'ativo',
       };
     }).sort((a,b)=>b.area-a.area);
@@ -4050,6 +4078,12 @@ function atualizarFiltroRestricoes(){
   applyQFilters();
 }
 function subPassaFiltrosNumericos(q, sub) {
+  // Zona da PARTE (sub.zona), com fallback pra zona da quadra inteira —
+  // aplicado antes de tudo, inclusive pra pedaços restritos, porque a zona
+  // predominante da quadra (q.zona) pode não valer mais pra esta parte
+  // específica quando a composição foi separada por zoneamento misto.
+  const zonaSub = sub.zona || q.zona;
+  if (qfilters.zona!=='Todos' && zonaSub!==qfilters.zona) return false;
   if (sub.tipo === 'restrito') {
     if (!RESTRICOES_OCULTAS.size) return true;
     const qidBase = q.id.split('-')[0];
@@ -4062,15 +4096,17 @@ function subPassaFiltrosNumericos(q, sub) {
   if (vgvMi < qfilters.vgvMin || vgvMi > qfilters.vgvMax) return false;
   const precoQ = q.precoLocal || 0;
   if (precoQ < qfilters.precoMin || precoQ > qfilters.precoMax) return false;
-  // CA máximo do zoneamento (potencial construtivo). Zona com CA máx 1 não
-  // admite incorporação — por isso o padrão do filtro é 2. Área em Operação
+  // CA máximo do zoneamento (potencial construtivo) — usa a zona DESTA
+  // PARTE, não a da quadra inteira. Zona com CA máx 1 não admite
+  // incorporação — por isso o padrão do filtro é 2. Área em Operação
   // Urbana não segue o zoneamento e entra como 4,0 (ver caMaximoAplicavel).
-  const caMaxZona = caMaximoAplicavel(q.zona, q.ou);
+  const caMaxZona = caMaximoAplicavel(zonaSub, q.ou);
   if (caMaxZona < qfilters.caMaxZonaMin || caMaxZona > qfilters.caMaxZonaMax) return false;
   // CA utilizado: só calcula se algum limite foi de fato preenchido,
   // pra não gastar tempo com isso em toda quadra do mapa sem necessidade
   if (qfilters.caMin > 0 || qfilters.caMax < Infinity) {
-    const ap = aproveitamentoSub(q, sub);
+    const qz = zonaSub === q.zona ? q : { ...q, zona: zonaSub };
+    const ap = aproveitamentoSub(qz, sub);
     if (ap.ca < qfilters.caMin || ap.ca > qfilters.caMax) return false;
   }
   return true;
@@ -4079,7 +4115,9 @@ function applyQFilters() {
   const hideOU=document.getElementById('q-hide-ou')?.checked||false;
   visibleQuadras=QUADRAS.filter(q=>{
     if(qfilters.bairro!=='Todos'&&q.bairro!==qfilters.bairro) return false;
-    if(qfilters.zona!=='Todos'&&q.zona!==qfilters.zona) return false;
+    // O filtro de zona agora é decidido por subgrupo em subPassaFiltrosNumericos
+    // (não mais aqui pela zona "predominante" q.zona) — uma composição pode
+    // ter sido separada com zona diferente da quadra inteira.
     if(hideOU&&q.ou) return false;
     // Inclui a quadra se QUALQUER pedaço dela (restrito, ou ativo que passe
     // nos filtros numéricos) mereça aparecer — os pedaços que não passarem
@@ -4176,9 +4214,10 @@ function renderQuadraMarkers() {
       return;
     }
 
-    // Alguma restrição no meio: cada pedaço vira UM contorno sólido só
-    // (união geométrica real dos lotes que o compõem — sem costuras internas
-    // e sem aproximação por envoltória convexa)
+    // Mais de um pedaço na quadra (restrição no meio e/ou zoneamento misto
+    // cortando a quadra): cada pedaço vira UM contorno sólido só (união
+    // geométrica real dos lotes que o compõem — sem costuras internas e
+    // sem aproximação por envoltória convexa)
     const qidBase = q.id.split('-')[0];
     subs.forEach(sub=>{
       if (!subPassaFiltrosNumericos(q, sub)) return;
@@ -4228,7 +4267,7 @@ function renderQuadraList() {
       </div>
       <div class="card-meta">
         <span class="cm">📍 ${q.bairro}</span>
-        ${zonePill(q.zona)}
+        ${zonePill(sub.zona||q.zona)}
         <span class="cm">${sub.n} lotes vizinhos</span>
         ${restrito
           ? `<span class="cm" style="color:#888">sem score (restrito)</span>`
@@ -4770,7 +4809,12 @@ function selectQuadra(qid, subId, manterView, bairroHint){
   const activeSub = subs.find(s=>s.subId===subId) || subs[0];
   selectedSubId = activeSub.subId;
   selectedBairro = q.bairro;
-  const _stats = activeSub; // {area, n, score, vgv, lotes, subId, dividido}
+  const _stats = activeSub; // {area, n, score, vgv, lotes, subId, dividido, zona}
+  // Zona efetiva desta parte (pode diferir da zona "predominante" da quadra
+  // inteira, guardada em q.zona, quando a composição foi dividida por
+  // zoneamento — ver getSubGroups). Usar sempre qz.zona pra CA/score/VGV
+  // desta ficha, e q.zona só pra referência da quadra inteira.
+  const qz = (_stats.zona && _stats.zona !== q.zona) ? { ...q, zona: _stats.zona } : q;
   const isCompactoQ = currentProfile==='compacto';
   const dispPrecoQ = isCompactoQ ? (q.precoLocalCompacto||VGV_PRECO[q.bairro]||14000) : (q.precoLocal||VGV_PRECO[q.bairro]||14000);
   const dispPctQ = isCompactoQ ? q.pctVendidoCompacto : q.pctVendido;
@@ -4831,14 +4875,14 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     <div class="detail-close" onclick="closeDetail()">✕ Fechar</div>
     <div class="dp-hd">
       <div class="dp-sql">Quadra ${_stats.subId}${_stats.dividido?` <span style="font-size:10px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 6px">parte ${_stats.subId.split('~')[1]}</span>`:''}</div>
-      <div class="dp-sub">${q.bairro} ${zonePill(q.zona)}</div>
+      <div class="dp-sub">${q.bairro} ${zonePill(qz.zona)}</div>
     </div>
     <div class="actions" style="padding-bottom:0">
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
     </div>
     <div class="score-box">
-      <div class="score-lbl">Potencial de composição${_stats.dividido?' (pedaço separado por restrição)':''}</div>
+      <div class="score-lbl">Potencial de composição${_stats.dividido?' (pedaço separado por restrição ou zoneamento)':''}</div>
       <div class="score-num" style="color:#7b1fa2">${_stats.area.toLocaleString('pt-BR')}<span style="font-size:13px;color:#aaa"> m²</span></div>
       <div style="font-size:12px;color:#555;margin-top:4px">${_stats.n} lotes${_stats.dividido?` (de ${q.n} originais)`:''} · score ${_stats.score} <span style="font-size:11px;color:#aaa">(negociação: ${negSc(_stats.n)}/20 pts)</span></div>
       <div class="score-track"><div class="score-fill" style="width:${Math.min(100,_stats.area/500)}%;background:#7b1fa2"></div></div>
@@ -4848,7 +4892,8 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <div class="dp-st">Dados da quadra</div>
       <div class="dp-r"><span class="dp-rl">Quadra fiscal</span><span class="dp-rv">${q.id}</span></div>
       <div class="dp-r"><span class="dp-rl">Bairro</span><span class="dp-rv">${q.bairro}</span></div>
-      <div class="dp-r"><span class="dp-rl">Zoneamento</span><span class="dp-rv">${zonePill(q.zona)}</span></div>
+      <div class="dp-r"><span class="dp-rl">Zoneamento${qz!==q?' (desta parte)':''}</span><span class="dp-rv">${zonePill(qz.zona)}</span></div>
+      ${qz!==q ? `<div style="font-size:10px;color:#aaa;margin:-2px 0 6px">Quadra inteira tem zoneamento misto — esta parte foi separada por ter zona diferente do restante.</div>` : ''}
       <div class="dp-r"><span class="dp-rl">Lotes contíguos${_stats.dividido?' (desta parte)':''}</span><span class="dp-rv">${_stats.n}${_stats.dividido?` (de ${q.n} originais)`:''}</span></div>
       <div class="dp-r"><span class="dp-rl">Área média por lote contíguo</span><span class="dp-rv">${Math.round(_stats.area/_stats.n).toLocaleString('pt-BR')} m²</span></div>
     </div>
@@ -4860,7 +4905,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <div class="dp-st">Composição do score — ${_stats.score} / 100</div>
       ${(()=>{
         const isCompacto = currentProfile==='compacto';
-        const zSc=ZONA_SC[q.zona]||0;
+        const zSc=ZONA_SC[qz.zona]||0;
         const eSc=negSc(_stats.n);
         const vgvGrupo = _stats.vgv;
         const vgSc = calcVgvScore(vgvGrupo, 20000000, 1500000000, 15);
@@ -4877,11 +4922,11 @@ function selectQuadra(qid, subId, manterView, bairroHint){
           lqSc=liqScore(q.pctVendido,15);
           lblPreco='Valor de mercado (R$'+(q.precoLocal||VGV_PRECO[q.bairro]||14000).toLocaleString('pt-BR')+'/m²)';
         }
-        const ap = aproveitamentoSub(q, _stats);
+        const ap = aproveitamentoSub(qz, _stats);
         const penalCa = Math.round(Math.max(0, Math.min(1, ap.pctCaMax/150)) * CA_PENALIDADE_MAXPTS);
-        const bonusAval = fatorAvaliacaoScore(q, _stats.area, _stats.lotes);
+        const bonusAval = fatorAvaliacaoScore(qz, _stats.area, _stats.lotes);
         return [
-          scoreBar("Zoneamento ("+q.zona+")",zSc,20),
+          scoreBar("Zoneamento ("+qz.zona+")",zSc,20),
           scoreBar(lblPreco,pSc,isCompacto?25:20),
           scoreBar("Liquidez de mercado (% vendido na região)",lqSc,isCompacto?20:15),
           isCompacto?'':scoreBar("VGV estimado",vgSc,15),
@@ -4892,10 +4937,10 @@ function selectQuadra(qid, subId, manterView, bairroHint){
         ].join("");
       })()}
     </div>
-    ${htmlAvaliacaoPreliminar(q, _stats)}
+    ${htmlAvaliacaoPreliminar(qz, _stats)}
     ${(()=>{
-      const ap = aproveitamentoSub(q, _stats);
-      const venal = venalTerrenoSub(q, _stats);
+      const ap = aproveitamentoSub(qz, _stats);
+      const venal = venalTerrenoSub(qz, _stats);
       // faixa de cor: quanto menos construído, melhor a oportunidade
       const cor = ap.pctCaMax < 25 ? '#2e7d32' : ap.pctCaMax < 60 ? '#f9a825' : '#c62828';
       const rotulo = ap.pctCaMax < 25 ? 'subutilizado' : ap.pctCaMax < 60 ? 'parcialmente usado' : 'bem aproveitado';
@@ -4972,8 +5017,8 @@ function selectQuadra(qid, subId, manterView, bairroHint){
         solidariedade) como aproximação. <strong>Consulte a legislação específica da
         operação urbana</strong> antes de usar este número.
       </div>` : ''}
-      <div class="dp-r"><span class="dp-rl">CA efetivo ${q.ou?'<span style="font-size:9px;color:#8a6d1a;font-weight:600">(OU — simplificado)</span>':'(c/ cota solidar.)'}</span><span class="dp-rv">${caEfetivo(q.zona, q.ou).toFixed(2)}x</span></div>
-      <div class="dp-r"><span class="dp-rl">Área construível est.</span><span class="dp-rv">${Math.round(_stats.area*caEfetivo(q.zona, q.ou)).toLocaleString('pt-BR')} m²</span></div>
+      <div class="dp-r"><span class="dp-rl">CA efetivo ${q.ou?'<span style="font-size:9px;color:#8a6d1a;font-weight:600">(OU — simplificado)</span>':'(c/ cota solidar.)'}</span><span class="dp-rv">${caEfetivo(qz.zona, q.ou).toFixed(2)}x</span></div>
+      <div class="dp-r"><span class="dp-rl">Área construível est.</span><span class="dp-rv">${Math.round(_stats.area*caEfetivo(qz.zona, q.ou)).toLocaleString('pt-BR')} m²</span></div>
       <div class="dp-r"><span class="dp-rl">Preço médio m² ${dispFonteQ==='hiperlocal'?'<span style="font-size:9px;color:#2e7d32;font-weight:600">(hiperlocal)</span>':'<span style="font-size:9px;color:#aaa">(méd. bairro)</span>'}</span><span class="dp-rv">R$ ${dispPrecoQ.toLocaleString('pt-BR')}/m²</span></div>
       <div class="dp-r"><span class="dp-rl">% vendido (5 lanç. próximos)</span><span class="dp-rv">${(dispPctQ||0).toFixed(0)}%</span></div>
       <button class="dash-row-btn" style="width:100%;margin-top:7px" onclick="abrirBenchmarkLancamentos('${q.id}')">Ver benchmark →</button>
