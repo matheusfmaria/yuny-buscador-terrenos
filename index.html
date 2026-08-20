@@ -635,6 +635,16 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <button id="bm-mapa" onclick="setBasemap('mapa')" style="border:none;padding:6px 12px;cursor:pointer;background:#2e7d32;color:#fff;font-weight:600">🗺 Mapa</button>
       <button id="bm-satelite" onclick="setBasemap('satelite')" style="border:none;padding:6px 12px;cursor:pointer;background:#fff;color:#333">🛰 Satélite</button>
     </div>
+    <!-- Imagens históricas de satélite (Esri Wayback) — só aparece com o
+         satélite ativo. As datas são de PUBLICAÇÃO do mosaico global da
+         Esri, não necessariamente a data exata da foto aérea de SP; e nem
+         toda data tem imagem diferente pra toda região (é um mosaico
+         mundial, atualizado por partes). -->
+    <div id="wayback-ctrl" style="display:none;position:absolute;top:46px;right:10px;z-index:1000;background:#fff;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.3);padding:5px 8px;font-size:11.5px">
+      <select id="wayback-select" onchange="trocarDataSatelite(this.value)" style="border:none;background:transparent;font-size:11.5px;color:#333;cursor:pointer">
+        <option value="">🕐 Atual</option>
+      </select>
+    </div>
 
     <!-- LAYER CONTROLS -->
     <div class="layer-ctrl" id="layer-ctrl">
@@ -1964,6 +1974,13 @@ function mesclarPacoteDistrito(pacote){
   // composta bairro::qid, igual GRUPOS_EDGES, pela mesma razão (colisão de
   // "setor.quadra" entre bairros vizinhos).
   if (pacote.gruposGeom) Object.assign(GEOM_MAP, pacote.gruposGeom);
+  if (pacote.vilasPotenciais) {
+    pacote.vilasPotenciais.forEach(v => {
+      const chave = v.bairro + '::' + v.membros[0].split('-')[0];
+      if (!VILAS_POTENCIAIS[chave]) VILAS_POTENCIAIS[chave] = [];
+      VILAS_POTENCIAIS[chave].push(v);
+    });
+  }
   const novasQuadras = pacote.grupos.map(mapearGrupoParaQuadra);
   pushSeguro(QUADRAS, novasQuadras);
   return novasQuadras.length;
@@ -2174,18 +2191,57 @@ function _onTileError(){
 }
 basemapMapa.on('tileerror', _onTileError);
 basemapSatelite.on('tileerror', _onTileError);
+
+// ── Satélite histórico (Esri World Imagery Wayback) ──
+// Mesmo provedor (Esri) do satélite atual — arquivo gratuito com mais de
+// 150 versões datadas do mosaico mundial desde fev/2014. A data é de
+// PUBLICAÇÃO do mosaico global, não necessariamente a data exata da foto
+// de São Paulo (mosaico é atualizado por regiões, não o mundo todo de
+// uma vez). Curado aqui: ~1 a cada 2 anos, todas em jul/ago (mesma
+// estação, pra comparação mais justa entre anos).
+const WAYBACK_RELEASES = [
+  {label:'2024-08-15', release:32553},
+  {label:'2021-08-11', release:51423},
+  {label:'2018-08-15', release:1858},
+  {label:'2016-07-20', release:5097},
+  {label:'2014-07-02', release:3026},
+];
+const TILES_SAT_ATUAL = TILES_SAT;
+function trocarDataSatelite(releaseStr) {
+  const estavaVisivel = map.hasLayer(basemapSatelite);
+  if (estavaVisivel) map.removeLayer(basemapSatelite);
+  const novaUrl = releaseStr
+    ? `https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/${releaseStr}/{z}/{y}/{x}`
+    : TILES_SAT_ATUAL;
+  basemapSatelite = L.tileLayer(novaUrl, {attribution: ATTR_SAT, maxZoom:19, crossOrigin: TILES_COM_CORS});
+  basemapSatelite.on('tileerror', _onTileError);
+  if (estavaVisivel) basemapSatelite.addTo(map);
+}
 function setBasemap(qual){
   _sincronizarBotoesCaptura(qual);
+  const ctrlWayback = document.getElementById('wayback-ctrl');
   if (qual==='satelite') {
     if (map.hasLayer(basemapMapa)) map.removeLayer(basemapMapa); basemapSatelite.addTo(map);
     document.getElementById('bm-satelite').style.background='#2e7d32'; document.getElementById('bm-satelite').style.color='#fff'; document.getElementById('bm-satelite').style.fontWeight='600';
     document.getElementById('bm-mapa').style.background='#fff'; document.getElementById('bm-mapa').style.color='#333'; document.getElementById('bm-mapa').style.fontWeight='400';
+    if (ctrlWayback) ctrlWayback.style.display='block';
   } else {
     if (map.hasLayer(basemapSatelite)) map.removeLayer(basemapSatelite); basemapMapa.addTo(map);
     document.getElementById('bm-mapa').style.background='#2e7d32'; document.getElementById('bm-mapa').style.color='#fff'; document.getElementById('bm-mapa').style.fontWeight='600';
     document.getElementById('bm-satelite').style.background='#fff'; document.getElementById('bm-satelite').style.color='#333'; document.getElementById('bm-satelite').style.fontWeight='400';
+    if (ctrlWayback) ctrlWayback.style.display='none';
   }
 }
+(function popularWaybackSelect(){
+  const sel = document.getElementById('wayback-select');
+  if (!sel) return;
+  WAYBACK_RELEASES.forEach(r => {
+    const opt = document.createElement('option');
+    opt.value = r.release;
+    opt.textContent = '🕐 ' + r.label;
+    sel.appendChild(opt);
+  });
+})();
 
 // Layer groups
 const layers = {
@@ -4206,6 +4262,16 @@ function scoreColor(score) {
 
 // Mapa id → geometria real do polígono (lookup rápido)
 const GEOM_MAP = {};
+// Grupos de composições que hoje aparecem como clusters desconectados
+// (sufixo -b/-c) mas pertencem ao mesmo polígono oficial de quadra fiscal
+// (Geoportal) — ou seja, o que os separa não é uma rua pública de
+// verdade (senão teria virado outro número de quadra), e sim algo
+// interno, tipicamente uma vila (rua sem saída privada) passível de
+// descaracterização se todos os lotes forem adquiridos. Chave composta
+// bairro::qidBase (mesmo padrão de GRUPOS_EDGES, mesma razão: colisão de
+// setor.quadra entre bairros vizinhos). Valor: array de grupos, cada um
+// {membros: [subId,...]} — normalmente só 1 grupo por chave.
+const VILAS_POTENCIAIS = {};
 
 // Converte coordenadas GeoJSON [lon,lat] para o formato Leaflet [lat,lon]
 // usando L.polygon/L.multiPolygon diretamente (sem L.geoJSON) — evita bug
@@ -4292,6 +4358,71 @@ function renderQuadraMarkers() {
   });
 }
 
+// ── Vilas potenciais: composições que hoje são clusters desconectados mas
+// pertencem à mesma quadra fiscal oficial — candidatas a "descaracterização
+// de vila" se todos os lotes forem adquiridos (ver VILAS_POTENCIAIS acima) ──
+function getVilaPotencial(q) {
+  const qidBase = q.id.split('-')[0];
+  const chave = q.bairro + '::' + qidBase;
+  const grupos = VILAS_POTENCIAIS[chave];
+  if (!grupos) return null;
+  return grupos.find(g => g.membros.includes(q.id)) || null;
+}
+function statsVilaPotencial(bairro, membros) {
+  const quadras = membros.map(id => QUADRAS.find(q => q.id === id && q.bairro === bairro)).filter(Boolean);
+  if (quadras.length < 2) return null;
+  const qidBase = quadras[0].id.split('-')[0];
+  let lotesTodos = [];
+  quadras.forEach(q => { lotesTodos = lotesTodos.concat(q.lotes); });
+  let area = 0;
+  lotesTodos.forEach(l => { area += LOTES_AREA[`${qidBase}.${l}`] || 0; });
+  area = Math.round(area);
+  const qBase = quadras[0]; // usa zona/bairro/preço/formato da primeira parte como referência
+  const score = getScoreForStats(qBase, area, lotesTodos.length, lotesTodos);
+  const vgv = calcVGVForArea(qBase, area);
+  return { quadras, membros, area, n: lotesTodos.length, score, vgv, zona: qBase.zona, qidBase, bairro };
+}
+function abrirVilaPotencial(bairro, qidBase) {
+  const chave = bairro + '::' + qidBase;
+  const grupo = (VILAS_POTENCIAIS[chave] || [])[0];
+  if (!grupo) return;
+  const stats = statsVilaPotencial(bairro, grupo.membros);
+  if (!stats) return;
+  selectedQid=null; selectedSubId=null; selectedSql=null;
+  openDetail();
+  const det = document.getElementById('detail');
+  det.innerHTML = `
+    <div class="detail-close" onclick="closeDetail()">✕ Fechar</div>
+    <div class="dp-sql">Vila potencial — ${stats.membros.length} partes</div>
+    <div class="dp-sub">${bairro} ${zonePill(stats.zona)}
+      <span style="font-size:9px;background:#c9a227;color:#fff;border-radius:3px;padding:1px 6px;margin-left:4px">requer descaracterização</span>
+    </div>
+    <div style="margin:10px 12px;padding:10px;background:#fdf6e3;border:1px solid #e8d9a0;border-radius:6px;font-size:11.5px;color:#7a6323;line-height:1.5">
+      ⚠️ Estas ${stats.membros.length} composições hoje são fisicamente separadas por uma via interna
+      (padrão de vila), mas pertencem à mesma quadra fiscal oficial — ou seja, o que as separa
+      não é uma rua pública de verdade. Se <strong>todos os lotes</strong> das partes abaixo forem
+      adquiridos, a via pode ser descaracterizada e a área toda incorporada numa composição só.
+      A área da própria via <strong>não está incluída</strong> no cálculo abaixo — só a soma dos
+      lotes já cadastrados.
+    </div>
+    <div class="score-box">
+      <div class="score-lbl">Potencial combinado (referencial, pendente de descaracterização)</div>
+      <div class="score-val">${stats.score}<span style="font-size:12px;color:#999">/100</span></div>
+    </div>
+    <div class="dp-r"><span class="dp-rl">Área total dos lotes cadastrados</span><span class="dp-rv">${stats.area.toLocaleString('pt-BR')} m²</span></div>
+    <div class="dp-r"><span class="dp-rl">Lotes ao todo</span><span class="dp-rv">${stats.n}</span></div>
+    <div class="dp-r"><span class="dp-rl">VGV estimado (sem área da via)</span><span class="dp-rv">R$ ${(stats.vgv/1e6).toFixed(1)}M</span></div>
+    <div class="fl" style="margin:12px 12px 6px">Partes desta vila</div>
+    ${stats.quadras.map(q => `
+      <div class="qcard" style="margin:0 12px 8px" onclick="selectQuadra('${q.id}', undefined, false, '${bairro.replace(/'/g,"\\'")}')">
+        <div class="card-top">
+          <span class="card-id">Quadra ${q.id}</span>
+          <span class="area-big">${q.area.toLocaleString('pt-BR')} m²</span>
+        </div>
+        <div class="card-meta"><span class="cm">${q.n} lotes</span></div>
+      </div>`).join('')}
+  `;
+}
 function renderQuadraList() {
   const el=document.getElementById('quadra-list');
   const sortBy=document.getElementById('q-sort')?.value || 'area';
@@ -4309,8 +4440,41 @@ function renderQuadraList() {
     vgv:   (a,b)=>(b.sub.vgv??-1)-(a.sub.vgv??-1),
   };
   const sorted=cards.sort(sortFns[sortBy]||sortFns.area).slice(0,80);
-  if(!sorted.length){el.innerHTML='<div style="padding:20px;text-align:center;color:#aaa;font-size:13px">Nenhuma quadra.</div>';return;}
-  el.innerHTML=sorted.map(({q,sub})=>{
+  if(!sorted.length && !Object.keys(VILAS_POTENCIAIS).length){el.innerHTML='<div style="padding:20px;text-align:center;color:#aaa;font-size:13px">Nenhuma quadra.</div>';return;}
+
+  // Vilas potenciais: aparecem à parte, no topo, respeitando só o filtro de
+  // bairro (são um agrupamento informativo, não uma composição fechada —
+  // não faz sentido aplicar filtro de score/CA/etc nelas ainda)
+  const vilaCardsHtml = [];
+  const vilasJaVistas = new Set();
+  Object.entries(VILAS_POTENCIAIS).forEach(([chave, grupos]) => {
+    const bairro = chave.split('::')[0];
+    if (qfilters.bairro!=='Todos' && bairro!==qfilters.bairro) return;
+    grupos.forEach(g => {
+      const idGrupo = chave+'::'+g.membros.join(',');
+      if (vilasJaVistas.has(idGrupo)) return;
+      vilasJaVistas.add(idGrupo);
+      const stats = statsVilaPotencial(bairro, g.membros);
+      if (!stats) return;
+      vilaCardsHtml.push(`
+        <div class="qcard" style="border:1px dashed #c9a227;background:#fdf9ef" onclick="abrirVilaPotencial('${bairro.replace(/'/g,"\\'")}','${stats.qidBase}')">
+          <div class="card-top">
+            <span class="card-id">🏘️ Vila potencial · ${stats.membros.length} partes <span style="font-size:9px;background:#c9a227;color:#fff;border-radius:3px;padding:1px 5px">requer descaracterização</span></span>
+            <span class="area-big">${(stats.area/1000).toFixed(1)}k m²</span>
+          </div>
+          <div class="card-meta">
+            <span class="cm">📍 ${bairro}</span>
+            ${zonePill(stats.zona)}
+            <span class="cm">${stats.n} lotes ao todo</span>
+            <span class="cm">score ${stats.score}</span>
+            <span class="cm" style="color:#1a2e1a;font-weight:600">VGV ~R$ ${(stats.vgv/1e6).toFixed(0)}M</span>
+          </div>
+        </div>`);
+    });
+  });
+
+  if(!sorted.length){el.innerHTML=vilaCardsHtml.join('') || '<div style="padding:20px;text-align:center;color:#aaa;font-size:13px">Nenhuma quadra.</div>';return;}
+  el.innerHTML=vilaCardsHtml.join('')+sorted.map(({q,sub})=>{
     const sel = q.id===selectedQid && sub.subId===selectedSubId && q.bairro===selectedBairro;
     const restrito = sub.tipo==='restrito';
     return `
@@ -4951,6 +5115,19 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <div class="dp-r"><span class="dp-rl">Lotes contíguos${_stats.dividido?' (desta parte)':''}</span><span class="dp-rv">${_stats.n}${_stats.dividido?` (de ${q.n} originais)`:''}</span></div>
       <div class="dp-r"><span class="dp-rl">Área média por lote contíguo</span><span class="dp-rv">${Math.round(_stats.area/_stats.n).toLocaleString('pt-BR')} m²</span></div>
     </div>
+    ${(() => {
+      const vila = getVilaPotencial(q);
+      if (!vila) return '';
+      const outras = vila.membros.filter(m => m !== q.id);
+      return `<div style="margin:0 12px 10px;padding:9px 10px;background:#fdf6e3;border:1px solid #e8d9a0;border-radius:6px;font-size:11px;color:#7a6323;line-height:1.5">
+        🏘️ Esta composição pode fazer parte de uma <strong>vila potencial</strong> junto com
+        ${outras.length===1?'a quadra '+outras[0]:outras.length+' outras quadras ('+outras.join(', ')+')'} —
+        hoje separadas por uma via interna, mas da mesma quadra fiscal oficial. Se todos os lotes
+        forem adquiridos, a via pode ser descaracterizada e a área incorporada numa composição só.
+        <button class="act-btn" style="margin-top:6px;padding:3px 8px;font-size:10.5px"
+          onclick="abrirVilaPotencial('${q.bairro.replace(/'/g,"\\'")}','${q.id.split('-')[0]}')">Ver vila combinada</button>
+      </div>`;
+    })()}
     <div class="dp-sec">
       <div class="dp-st">Lotes contíguos${_stats.dividido?' desta parte':' do grupo'}</div>
       <div class="sql-list">${_stats.lotes.map(l=>'<span style="display:inline-block;background:#f0f0f0;border-radius:3px;padding:1px 6px;margin:2px;font-size:11px;font-family:monospace">SQL '+q.id.split('-')[0]+'.'+l+'</span>').join('')}</div>
