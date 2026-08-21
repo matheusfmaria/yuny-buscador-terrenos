@@ -600,13 +600,13 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
           <span>até</span>
           <input type="number" id="qf-ca-max" placeholder="Máx" step="0.1" inputmode="decimal" oninput="atualizarFiltroNumerico()">
         </div>
-        <label class="check-row"><input type="checkbox" id="q-hide-ou" onchange="applyQFilters()"> Ocultar quadras em Operação Urbana</label>
+        <label class="check-row"><input type="checkbox" id="q-hide-ou" checked onchange="applyQFilters()"> Ocultar quadras em Operação Urbana</label>
         <div class="fl" style="margin-top:8px">Ocultar restrições no mapa</div>
-        <label class="check-row"><input type="checkbox" id="q-hide-obras" onchange="atualizarFiltroRestricoes()"> 🏗 Obras</label>
+        <label class="check-row"><input type="checkbox" id="q-hide-obras" checked onchange="atualizarFiltroRestricoes()"> 🏗 Obras</label>
         <label class="check-row"><input type="checkbox" id="q-hide-dificil" onchange="atualizarFiltroRestricoes()"> ⚠️ Difícil</label>
         <label class="check-row"><input type="checkbox" id="q-hide-futuro" onchange="atualizarFiltroRestricoes()"> 🏢 Futuro lançamento</label>
         <label class="check-row"><input type="checkbox" id="q-hide-descarte" onchange="atualizarFiltroRestricoes()"> 🗂️ Descarte temporário</label>
-        <label class="check-row"><input type="checkbox" id="q-hide-naoedificavel" onchange="atualizarFiltroRestricoes()"> 🌳 Não Edificável</label>
+        <label class="check-row"><input type="checkbox" id="q-hide-naoedificavel" checked onchange="atualizarFiltroRestricoes()"> 🌳 Não Edificável</label>
       </div>
       <div class="list-half">
       <div class="stats-bar">
@@ -6067,7 +6067,7 @@ function iniciarApp(){
     loadPerimetrosLayer();
     atualizarContadorRegioes();
     applyFilters();
-    applyQFilters();
+    atualizarFiltroRestricoes(); // já chama applyQFilters() internamente — aplica de fato os checkboxes marcados por padrão (Operação Urbana, Obras, Não Edificável)
     carregarCorretores();
     abrirDashboardProspeccao(); // toda vez que o sistema abre, mostra o resumo
     atualizarDashboardProspeccaoSeAberto();
@@ -6075,7 +6075,7 @@ function iniciarApp(){
     loadPerimetrosLayer();
     atualizarContadorRegioes();
     applyFilters();
-    applyQFilters();
+    atualizarFiltroRestricoes();
   });
 }
 
