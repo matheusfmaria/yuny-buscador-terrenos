@@ -663,7 +663,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <div class="lg-row"><div class="lg-dot" style="background:#f9a825"></div> Score médio (48–71)</div>
       <div class="lg-row"><div class="lg-dot" style="background:#c62828"></div> Score baixo (&lt; 48)</div>
       <div style="height:6px"></div>
-      <div class="lg-row"><div class="lg-dot" style="background:#8e24aa"></div> Empreendimento (GeoImóvel)</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#8e24aa"></div> Empreendimento (GeoImóvel) / composição com empreendimento sobreposto</div>
 
     </div>
     <div class="map-info" id="map-info">🗺 Carregando...</div>
@@ -1980,6 +1980,9 @@ function mesclarPacoteDistrito(pacote){
       if (!VILAS_POTENCIAIS[chave]) VILAS_POTENCIAIS[chave] = [];
       VILAS_POTENCIAIS[chave].push(v);
     });
+  }
+  if (pacote.lotesComEmpreendimento) {
+    pacote.lotesComEmpreendimento.forEach(k => LOTES_COM_EMPREENDIMENTO.add(k));
   }
   const novasQuadras = pacote.grupos.map(mapearGrupoParaQuadra);
   pushSeguro(QUADRAS, novasQuadras);
@@ -4272,6 +4275,18 @@ const GEOM_MAP = {};
 // setor.quadra entre bairros vizinhos). Valor: array de grupos, cada um
 // {membros: [subId,...]} — normalmente só 1 grupo por chave.
 const VILAS_POTENCIAIS = {};
+// Lotes que têm um empreendimento (GeoImóvel) sobreposto — calculado
+// offline via point-in-polygon do lat/lon do empreendimento contra a
+// geometria do lote (com tolerância de ~25m pra imprecisão de
+// geocodificação). Usado só pra colorir a composição de roxo no mapa
+// (mesma cor da camada de Empreendimentos) — a ficha, o score e o VGV
+// continuam normais, é um flag visual pra apoiar a limpeza manual de
+// composições que já têm prédio construído/lançado em cima.
+const LOTES_COM_EMPREENDIMENTO = new Set();
+const COR_EMPREENDIMENTO_SOBREPOSTO = '#8e24aa';
+function temEmpreendimentoSobreposto(qidBase, lotes) {
+  return lotes.some(l => LOTES_COM_EMPREENDIMENTO.has(`${qidBase}.${l}`));
+}
 
 // Converte coordenadas GeoJSON [lon,lat] para o formato Leaflet [lat,lon]
 // usando L.polygon/L.multiPolygon diretamente (sem L.geoJSON) — evita bug
@@ -4302,7 +4317,8 @@ function renderQuadraMarkers() {
       // 27 originais). Só cai pra união ao vivo dos lotes se, por algum
       // motivo, a composição não tiver entrada em GEOM_MAP (não deveria
       // acontecer, mas mantém o fallback por segurança).
-      const c=corComposicao(q.id, scoreColor(subs[0].score));
+      const corBase = temEmpreendimentoSobreposto(q.id.split('-')[0], subs[0].lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(subs[0].score);
+      const c=corComposicao(q.id, corBase);
       const sel=q.id===selectedQid && q.bairro===selectedBairro;
       let layer;
       if(geom){
@@ -4342,7 +4358,8 @@ function renderQuadraMarkers() {
     subs.forEach(sub=>{
       if (!subPassaFiltrosNumericos(q, sub)) return;
       const restrito = sub.tipo==='restrito';
-      const c = corComposicao(sub.subId, restrito ? corComposicaoRestrita(qidBase, sub.lotes) : scoreColor(sub.score));
+      const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(sub.score);
+      const c = corComposicao(sub.subId, restrito ? corComposicaoRestrita(qidBase, sub.lotes) : corBaseAtivo);
       const sel=q.id===selectedQid && sub.subId===selectedSubId && q.bairro===selectedBairro;
       const unioned = unionLotesPolygonCached(qidBase, sub.lotes);
       const latlngs = geoJSONToLatLngs(unioned);
@@ -5128,6 +5145,11 @@ function selectQuadra(qid, subId, manterView, bairroHint){
           onclick="abrirVilaPotencial('${q.bairro.replace(/'/g,"\\'")}','${q.id.split('-')[0]}')">Ver vila combinada</button>
       </div>`;
     })()}
+    ${temEmpreendimentoSobreposto(q.id.split('-')[0], _stats.lotes) ? `<div style="margin:0 12px 10px;padding:9px 10px;background:#f3e5f7;border:1px solid #ce9ce0;border-radius:6px;font-size:11px;color:#5c1a6e;line-height:1.5">
+        🏢 Esta composição tem um <strong>empreendimento (GeoImóvel) sobreposto</strong> — por isso aparece roxa
+        no mapa, independente do score. Score, VGV e demais dados abaixo continuam calculados normalmente
+        (o terreno pode não estar mais disponível — considere remover/atualizar após conferência manual).
+      </div>` : ''}
     <div class="dp-sec">
       <div class="dp-st">Lotes contíguos${_stats.dividido?' desta parte':' do grupo'}</div>
       <div class="sql-list">${_stats.lotes.map(l=>'<span style="display:inline-block;background:#f0f0f0;border-radius:3px;padding:1px 6px;margin:2px;font-size:11px;font-family:monospace">SQL '+q.id.split('-')[0]+'.'+l+'</span>').join('')}</div>
