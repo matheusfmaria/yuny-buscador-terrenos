@@ -2743,8 +2743,18 @@ const DIAS_ALERTA_PROSPECCAO = 15;
 let PROSPECCAO_STATUS_CACHE = {};    // subId -> {subId,qid,bairro,lotes,area,corretor,email,dataEnvio}
 let PROSPECCAO_HISTORICO_CACHE = {}; // subId -> [{key,data,texto,lote}, ...] (mais recente primeiro)
 
-function corComposicao(key, corBase){
-  return PROSPECCAO_STATUS_CACHE[key] ? COR_PROSPECCAO : corBase;
+function corComposicao(key, corBase, lotesAtuais){
+  const status = PROSPECCAO_STATUS_CACHE[key];
+  if (!status) return corBase;
+  // Só pinta de azul (em prospecção) se TODOS os lotes desenhados agora
+  // ainda estiverem na lista de lotes da prospecção. Sem essa checagem,
+  // um lote retirado manualmente (removerLotesDaProspeccao encolhe
+  // status.lotes) continuava aparecendo azul, porque o desenho inteiro da
+  // composição física (mesmo polígono de sempre) só olhava se EXISTIA
+  // algum registro pra aquele subId — não se ele ainda cobria os lotes
+  // certos.
+  if (lotesAtuais && !lotesAtuais.every(l => status.lotes.includes(l))) return corBase;
+  return COR_PROSPECCAO;
 }
 
 function iniciarSincronizacaoProspeccao(){
@@ -3290,6 +3300,12 @@ function htmlAvisoDescarteAtivo(idComposicao){
 }
 function htmlSecaoHistorico(subId, lotes, qidBase, qidReal){
   const status = PROSPECCAO_STATUS_CACHE[subId];
+  // Cobertura parcial: acontece quando algum lote foi retirado manualmente
+  // da prospecção (removerLotesDaProspeccao encolhe status.lotes), mas a
+  // composição física em si (definida pela adjacência dos lotes) continua
+  // a mesma — sem essa checagem, a ficha mostraria "Em prospecção" cheio
+  // mesmo com lotes já retirados, inconsistente com o mapa (ver corComposicao).
+  const statusCobreTudo = status && lotes.every(l => status.lotes.includes(l));
   // junta o histórico do subId atual (pode ter sufixo "~N" de divisão por
   // zona/restrição, que é recalculada ao vivo e muda com o tempo) com o do
   // qidReal — a composição PERMANENTE (com sufixo -b/-c, se houver, mas
@@ -3306,7 +3322,8 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal){
 
   const statusHtml = status ? `
     <div class="hist-box" style="border-color:#1565c0;background:#eef4fc">
-      <span class="badge-prospeccao">📧 Em prospecção</span>
+      <span class="badge-prospeccao">📧 Em prospecção${statusCobreTudo?'':' (parcial)'}</span>
+      ${statusCobreTudo?'':`<div style="font-size:10px;color:#8a6d1a;margin-top:4px">Só ${status.lotes.length} de ${lotes.length} lotes desta composição continuam na prospecção — os demais foram retirados manualmente e não aparecem mais em azul no mapa.</div>`}
       <div style="font-size:11px;color:#555;margin-top:6px">
         Com <strong>${escapeHtmlHistorico(status.corretor)}</strong> desde ${formatarDataHistorico(status.dataEnvio)}
         ${dias!==null?` · última atualização há ${dias} dia${dias===1?'':'s'}`:''}
@@ -4482,7 +4499,7 @@ function renderQuadraMarkers() {
       // motivo, a composição não tiver entrada em GEOM_MAP (não deveria
       // acontecer, mas mantém o fallback por segurança).
       const corBase = temEmpreendimentoSobreposto(q.id.split('-')[0], subs[0].lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(subs[0].score);
-      const c=corComposicao(q.id, corBase);
+      const c=corComposicao(q.id, corBase, subs[0].lotes);
       const sel=q.id===selectedQid && q.bairro===selectedBairro;
       let layer;
       if(geom){
@@ -4523,7 +4540,7 @@ function renderQuadraMarkers() {
       if (!subPassaFiltrosNumericos(q, sub)) return;
       const restrito = sub.tipo==='restrito';
       const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(sub.score);
-      const c = corComposicao(sub.subId, restrito ? corComposicaoRestrita(qidBase, sub.lotes) : corBaseAtivo);
+      const c = corComposicao(sub.subId, restrito ? corComposicaoRestrita(qidBase, sub.lotes) : corBaseAtivo, sub.lotes);
       const sel=q.id===selectedQid && sub.subId===selectedSubId && q.bairro===selectedBairro;
       const unioned = unionLotesPolygonCached(qidBase, sub.lotes);
       const latlngs = geoJSONToLatLngs(unioned);
@@ -4661,7 +4678,7 @@ function renderQuadraList() {
     return `
     <div class="qcard ${sel?'sel':''}" onclick="selectQuadra('${q.id}','${sub.subId}',false,'${q.bairro.replace(/'/g,"\\'")}')" style="${restrito?'opacity:0.75':''}">
       <div class="card-top">
-        <span class="card-id">Quadra ${sub.subId}${PROSPECCAO_STATUS_CACHE[sub.subId]?' <span class="badge-prospeccao">📧 Prospecção</span>':''}${sub.dividido?(restrito?` <span style="font-size:9px;background:${corComposicaoRestrita(sub.parentId.split('-')[0],sub.lotes)};color:#fff;border-radius:3px;padding:1px 5px">${LABEL_RESTRICAO[sub.statusRestricao]||'restrito'}</span>`:` <span style="font-size:9px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 5px">parte ${sub.subId.split('~')[1]}</span>`):''}</span>
+        <span class="card-id">Quadra ${sub.subId}${(PROSPECCAO_STATUS_CACHE[sub.subId] && sub.lotes.every(l=>PROSPECCAO_STATUS_CACHE[sub.subId].lotes.includes(l)))?' <span class="badge-prospeccao">📧 Prospecção</span>':''}${sub.dividido?(restrito?` <span style="font-size:9px;background:${corComposicaoRestrita(sub.parentId.split('-')[0],sub.lotes)};color:#fff;border-radius:3px;padding:1px 5px">${LABEL_RESTRICAO[sub.statusRestricao]||'restrito'}</span>`:` <span style="font-size:9px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 5px">parte ${sub.subId.split('~')[1]}</span>`):''}</span>
         <span class="area-big">${(sub.area/1000).toFixed(1)}k m²</span>
       </div>
       <div class="card-meta">
@@ -5227,7 +5244,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       const corBase = st.tipo==='restrito'
         ? corComposicaoRestrita(qidBaseLayer, st.lotes)
         : (temEmpreendimentoSobreposto(qidBaseLayer, st.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(st.score));
-      const _c= corComposicao(layer._yunySubId, corBase);
+      const _c= corComposicao(layer._yunySubId, corBase, st.lotes);
       const _sel = layer._yunySubId===selectedSubId && layer._yunyBairro===q.bairro;
       const _style={color:_c,weight:_sel?2.5:1.5,fillColor:_c,fillOpacity:_sel?0.55:0.3,dashArray:_sel?null:'3,2'};
       if(layer.setStyle) layer.setStyle(_style);
