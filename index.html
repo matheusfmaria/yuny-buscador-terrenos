@@ -807,7 +807,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
 </div>
 
 <div id="sync-error-banner">
-  ⚠️ Sem acesso aos dados compartilhados da equipe (histórico, prospecções, restrições). O mapa funciona, mas nada fica salvo. Provável causa: regras do Firebase.
+  <span id="sync-error-texto">⚠️ Sem acesso aos dados compartilhados da equipe. O mapa funciona, mas nada fica salvo.</span>
   <button onclick="document.getElementById('sync-error-banner').classList.remove('on')">Ocultar</button>
 </div>
 
@@ -998,7 +998,8 @@ async function salvarProprietario(sql){
     catch(e) { console.warn('Não foi possível salvar o proprietário:', e); }
   }
   const qidBase = sql.split('.').slice(0,2).join('.');
-  await adicionarHistoricoComposicao(qidBase, `Proprietário do lote ${sql} registrado: ${nome}`, sql);
+  const loteNum = sql.split('.')[2];
+  await adicionarHistoricoComposicao(composicaoDoLote(qidBase, loteNum), `Proprietário do lote ${sql} registrado: ${nome}`, sql);
   if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
   mostrarToast('Proprietário salvo — agora vale para todo o time.');
 }
@@ -2556,9 +2557,32 @@ function fbKeyToSql(key){ return key.replace(/_/g,'.'); }
 // aparecia no console (F12) e o app seguia normal com tudo em branco —
 // já causou confusão real: parecia que os dados tinham sido apagados,
 // quando na verdade só estavam sendo bloqueados na leitura.
+// Nomeia especificamente qual(is) canal(is) falhou — antes a mensagem era
+// genérica ("sem acesso a nada"), o que assustava à toa quando só um
+// canal específico (geralmente um mais novo, cuja regra do Firebase ainda
+// não foi configurada) estava com problema e todo o resto funcionava normal.
+const CANAIS_COM_ERRO = new Set();
+const NOME_AMIGAVEL_CANAL = {
+  lotes_status: 'restrições de lote',
+  prospeccao_status: 'status de prospecção',
+  prospeccao_historico: 'histórico de prospecção',
+  descarte_status: 'descarte temporário',
+  descarte_retorno_log: 'log de retorno de descarte',
+  futuro_verificacao: 'rastreamento de futuro lançamento',
+  proprietarios: 'proprietários',
+  corretores: 'corretores salvos',
+  prospeccoes_enviadas: 'histórico de e-mails de prospecção',
+  empreendimento_ignorado: 'marcações de empreendimento removidas manualmente',
+};
 function avisarErroSincronizacao(origem, err){
   console.warn(`Firebase (${origem}):`, err);
+  CANAIS_COM_ERRO.add(origem);
   const banner = document.getElementById('sync-error-banner');
+  const texto = document.getElementById('sync-error-texto');
+  if (texto) {
+    const nomes = [...CANAIS_COM_ERRO].map(c => NOME_AMIGAVEL_CANAL[c] || c).join(', ');
+    texto.textContent = `⚠️ Sem acesso a: ${nomes}. O resto do app funciona normalmente. Provável causa: falta essa chave nas regras do Firebase.`;
+  }
   if (banner) banner.classList.add('on');
 }
 
@@ -2809,6 +2833,18 @@ function prospeccoesComLote(qidBase, lote){
     (PROSPECCAO_STATUS_CACHE[subId].lotes||[]).includes(lote));
 }
 
+// Acha a composição PERMANENTE (a quadra fiscal com o sufixo -b/-c, se
+// houver) à qual um lote pertence — usada pra ancorar o histórico no lugar
+// certo. Composições de quadras fiscais diferentes com sufixo -b/-c são
+// clusters fisicamente desconectados e não devem compartilhar histórico
+// entre si. NÃO considera o sufixo "~N" (divisão por zona/restrição, que
+// é recalculada ao vivo e pode mudar) — só o sufixo -b/-c, que é fixo
+// desde a geração dos dados (representa quadras fiscais permanentemente
+// distintas).
+function composicaoDoLote(qidBase, loteNum){
+  const candidata = QUADRAS.find(q => q.id.split('-')[0] === qidBase && q.lotes.includes(loteNum));
+  return candidata ? candidata.id : qidBase;
+}
 async function adicionarHistoricoComposicao(subId, texto, lote){
   const entrada = { data: new Date().toISOString(), texto, lote: lote || null };
   // otimista: já aparece na lista antes da confirmação do Firebase
@@ -2902,7 +2938,7 @@ async function marcarFuturoLancamento(sql, qidBase){
 async function removerFuturoLancamentoTracking(sql, qidBase){
   delete FUTURO_VERIFICACAO_CACHE[sql];
   if (_fbAtivo) { try { await _fbDb.ref('futuro_verificacao/'+sqlToFbKey(sql)).remove(); } catch(e){ console.warn(e); } }
-  await adicionarHistoricoComposicao(qidBase,
+  await adicionarHistoricoComposicao(composicaoDoLote(qidBase, sql.split('.')[2]),
     `Restrição "Futuro lançamento" removida do lote ${sql} — verificar se a área voltou a ficar disponível no mercado.`, sql);
   atualizarDashboardProspeccaoSeAberto();
 }
@@ -2924,8 +2960,9 @@ async function _atualizarRegistroFuturo(sql, qidBase, agora){
 
 async function confirmarFuturoLancamentoValido(sql){
   const agora = new Date().toISOString();
-  const registro = await _atualizarRegistroFuturo(sql, sql.split('.').slice(0,2).join('.'), agora);
-  await adicionarHistoricoComposicao(registro.qidBase,
+  const qidBase = sql.split('.').slice(0,2).join('.');
+  const registro = await _atualizarRegistroFuturo(sql, qidBase, agora);
+  await adicionarHistoricoComposicao(composicaoDoLote(qidBase, sql.split('.')[2]),
     `Restrição "Futuro lançamento" revisada — continua válida (lote ${sql}).`, sql);
   if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
   atualizarDashboardProspeccaoSeAberto();
@@ -2939,8 +2976,18 @@ async function confirmarFuturoLancamentoValidoGrupo(qidBase, sqlsCsv){
   const sqls = sqlsCsv.split(',');
   const agora = new Date().toISOString();
   for (const sql of sqls) await _atualizarRegistroFuturo(sql, qidBase, agora);
-  await adicionarHistoricoComposicao(qidBase,
-    `Restrição "Futuro lançamento" revisada — continua válida (${sqls.length} lote${sqls.length===1?'':'s'}: ${sqls.join(', ')}).`, null);
+  // Os lotes do grupo podem pertencer a composições diferentes da mesma
+  // quadra fiscal (sufixo -b/-c) — agrupa por composição real antes de
+  // registrar, pra não misturar histórico entre elas.
+  const porComposicao = {};
+  sqls.forEach(sql => {
+    const idComposicao = composicaoDoLote(qidBase, sql.split('.')[2]);
+    (porComposicao[idComposicao] = porComposicao[idComposicao] || []).push(sql);
+  });
+  for (const [idComposicao, sqlsDoGrupo] of Object.entries(porComposicao)) {
+    await adicionarHistoricoComposicao(idComposicao,
+      `Restrição "Futuro lançamento" revisada — continua válida (${sqlsDoGrupo.length} lote${sqlsDoGrupo.length===1?'':'s'}: ${sqlsDoGrupo.join(', ')}).`, null);
+  }
   if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
   atualizarDashboardProspeccaoSeAberto();
   mostrarToast(`Revisão registrada para ${sqls.length} lote${sqls.length===1?'':'s'} — próxima verificação em 3 meses.`);
@@ -3021,15 +3068,21 @@ function iniciarSincronizacaoDescarte(){
 
 // Registro que cobre um lote específico: primeiro tenta achar um registro
 // direto nele; se não tiver, pode estar coberto por um descarte de
-// composição inteira que inclua esse lote
+// composição inteira que inclua esse lote — procura em QUALQUER variante
+// da mesma quadra fiscal (a quadra base e qualquer sufixo -b/-c/...), não
+// só na chave exata, já que cada uma é uma composição própria e
+// independente, mas todas compartilham o mesmo prefixo de quadra fiscal.
 function descarteAtivoParaLote(sql){
   const direto = DESCARTE_STATUS_CACHE[sql];
   if (direto) return direto;
   const partes = sql.split('.');
   const qidBase = partes.slice(0,2).join('.');
   const loteNum = partes[2];
-  const grupo = DESCARTE_STATUS_CACHE[qidBase];
-  if (grupo && grupo.escopo === 'composicao' && grupo.lotes.includes(loteNum)) return grupo;
+  for (const chave in DESCARTE_STATUS_CACHE) {
+    if (chave !== qidBase && !chave.startsWith(qidBase + '-')) continue;
+    const grupo = DESCARTE_STATUS_CACHE[chave];
+    if (grupo && grupo.escopo === 'composicao' && grupo.lotes.includes(loteNum)) return grupo;
+  }
   return null;
 }
 
@@ -3076,7 +3129,8 @@ async function processarExpiracaoDescartes(){
     if (!registro || new Date(registro.dataExpira) > new Date()) continue;
     await removerDescarteTemporario(idPrincipal);
     const loteTexto = registro.escopo === 'lote' ? `${registro.qidBase}.${registro.lotes[0]}` : null;
-    await adicionarHistoricoComposicao(registro.qidBase,
+    const idComposicaoHistorico = registro.escopo === 'composicao' ? idPrincipal : composicaoDoLote(registro.qidBase, registro.lotes[0]);
+    await adicionarHistoricoComposicao(idComposicaoHistorico,
       `Descarte temporário expirado (6 meses) — motivo original: ${registro.motivo}. Voltou a ficar disponível para prospecção.`, loteTexto);
     const logEntry = { qidBase: registro.qidBase, escopo: registro.escopo, lotes: registro.lotes,
       motivoOriginal: registro.motivo, dataDescarte: registro.dataDescarte, dataExpirou: new Date().toISOString() };
@@ -3102,9 +3156,13 @@ async function confirmarDescarteTemporario(){
   const {escopo, idPrincipal, qidBase, lotes} = _descarteAtual;
   const registro = await aplicarDescarteTemporario(escopo, idPrincipal, qidBase, lotes, motivo);
   const loteTexto = escopo==='lote' ? `${qidBase}.${lotes[0]}` : null;
-  // histórico de descarte fica sempre no qidBase (o id estável da quadra) —
-  // diferente do subId da prospecção, que muda quando a composição se divide
-  await adicionarHistoricoComposicao(qidBase,
+  // Histórico ancorado na composição PERMANENTE certa: pra escopo
+  // 'composicao', idPrincipal já é o id completo (com sufixo -b/-c, se
+  // houver); pra escopo 'lote', resolve qual composição aquele lote
+  // específico pertence — nunca a quadra fiscal base compartilhada entre
+  // composições irmãs desconectadas.
+  const idComposicaoHistorico = escopo==='composicao' ? idPrincipal : composicaoDoLote(qidBase, lotes[0]);
+  await adicionarHistoricoComposicao(idComposicaoHistorico,
     `Descarte temporário registrado — motivo: ${motivo} (volta a ficar disponível em ${formatarDataHistorico(registro.dataExpira)})`, loteTexto);
   if (PROSPECCAO_STATUS_CACHE[qidBase] || Object.keys(PROSPECCAO_STATUS_CACHE).some(k=>k.startsWith(qidBase+'~'))) {
     await removerLotesDaProspeccao(qidBase, lotes);
@@ -3118,7 +3176,8 @@ async function cancelarDescarteAntecipado(idPrincipal){
   const registro = await removerDescarteTemporario(idPrincipal);
   if (!registro) return;
   const loteTexto = registro.escopo==='lote' ? `${registro.qidBase}.${registro.lotes[0]}` : null;
-  await adicionarHistoricoComposicao(registro.qidBase,
+  const idComposicaoHistorico = registro.escopo==='composicao' ? idPrincipal : composicaoDoLote(registro.qidBase, registro.lotes[0]);
+  await adicionarHistoricoComposicao(idComposicaoHistorico,
     'Descarte temporário cancelado manualmente antes do prazo — disponível para prospecção novamente.', loteTexto);
   renderQuadraMarkers(); renderQuadraList();
   try { if (selectedQid) selectQuadra(selectedQid, selectedSubId, true); } catch(e) { closeDetail(); }
@@ -3208,16 +3267,42 @@ function abrirPaginaRestricoes(qid, subId){
     </div>`;
 }
 
+// Caixinha de aviso de descarte temporário ativo — extraída em função
+// própria pra poder aparecer logo no topo da ficha (primeiro item, pedido
+// do Matheus pra facilitar a visualização), em vez de escondida lá embaixo
+// na seção de histórico. Retorna vazio se não houver descarte ativo.
+// IMPORTANTE: recebe o id COMPLETO da composição (ex: "016.075-b"), não a
+// quadra fiscal base ("016.075") — senão duas composições irmãs da mesma
+// quadra fiscal (sufixos -b/-c, que são independentes entre si)
+// compartilhariam o mesmo status de descarte por engano.
+function htmlAvisoDescarteAtivo(idComposicao){
+  const descarteGrupo = DESCARTE_STATUS_CACHE[idComposicao];
+  if (!descarteGrupo) return '';
+  return `
+    <div class="hist-box" style="margin:0 12px 10px;border-color:#8d6e63;background:#f2ece9">
+      <span class="badge-prospeccao" style="background:#8d6e63">🗂️ Descarte temporário</span>
+      <div style="font-size:11px;color:#555;margin-top:6px">
+        Motivo: ${escapeHtmlHistorico(descarteGrupo.motivo)}<br>
+        Volta a ficar disponível em <strong>${formatarDataHistorico(descarteGrupo.dataExpira)}</strong>
+      </div>
+      <button class="btn-retirar-prosp" onclick="cancelarDescarteAntecipado('${idComposicao}')">↩️ Cancelar descarte antecipadamente</button>
+    </div>`;
+}
 function htmlSecaoHistorico(subId, lotes, qidBase, qidReal){
   const status = PROSPECCAO_STATUS_CACHE[subId];
-  // junta o histórico do subId atual (prospecção) com o do qidBase estável
-  // (onde ficam descarte e as entradas manuais) — evita que o histórico
-  // "desapareça" quando a composição se divide e o subId muda de nome
+  // junta o histórico do subId atual (pode ter sufixo "~N" de divisão por
+  // zona/restrição, que é recalculada ao vivo e muda com o tempo) com o do
+  // qidReal — a composição PERMANENTE (com sufixo -b/-c, se houver, mas
+  // sem o "~N" dinâmico) — evita que o histórico "desapareça" quando a
+  // composição se divide por zona/restrição. NÃO usa mais qidBase (a
+  // quadra fiscal crua, sem sufixo -b/-c) aqui: duas composições
+  // permanentemente distintas da mesma quadra fiscal (ex: 016.075-b e
+  // 016.075-c, fisicamente desconectadas) não devem compartilhar histórico.
   const histSubId = PROSPECCAO_HISTORICO_CACHE[subId] || [];
-  const histQidBase = (subId !== qidBase) ? (PROSPECCAO_HISTORICO_CACHE[qidBase] || []) : [];
-  const hist = [...histSubId, ...histQidBase].sort((a,b)=> new Date(b.data) - new Date(a.data));
+  const histQidReal = (subId !== qidReal) ? (PROSPECCAO_HISTORICO_CACHE[qidReal] || []) : [];
+  const hist = [...histSubId, ...histQidReal].sort((a,b)=> new Date(b.data) - new Date(a.data));
   const dias = diasDesde(ultimaAtualizacaoProspeccao(subId));
-  const descarteGrupo = DESCARTE_STATUS_CACHE[qidBase]; // só existe se for escopo 'composicao'
+  const descarteGrupo = DESCARTE_STATUS_CACHE[qidReal]; // só existe se for escopo 'composicao'; usa o id completo (com sufixo), não a quadra fiscal base
 
   const statusHtml = status ? `
     <div class="hist-box" style="border-color:#1565c0;background:#eef4fc">
@@ -3230,16 +3315,11 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal){
       <button class="btn-retirar-prosp" onclick="abrirRetirarProspeccao('${subId}')">↩️ Retirar do status de prospecção</button>
     </div>` : '';
 
-  const descarteHtml = descarteGrupo ? `
-    <div class="hist-box" style="border-color:#8d6e63;background:#f2ece9">
-      <span class="badge-prospeccao" style="background:#8d6e63">🗂️ Descarte temporário</span>
-      <div style="font-size:11px;color:#555;margin-top:6px">
-        Motivo: ${escapeHtmlHistorico(descarteGrupo.motivo)}<br>
-        Volta a ficar disponível em <strong>${formatarDataHistorico(descarteGrupo.dataExpira)}</strong>
-      </div>
-      <button class="btn-retirar-prosp" onclick="cancelarDescarteAntecipado('${qidBase}')">↩️ Cancelar descarte antecipadamente</button>
-    </div>` : `
-    <button class="btn-retirar-prosp" style="border-color:#8d6e63;color:#8d6e63" onclick="abrirDescarteTemporario('composicao','${qidBase}','${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}])">🗂️ Descarte temporário</button>`;
+  // A caixinha de descarte ATIVO agora só aparece no topo da ficha (ver
+  // htmlAvisoDescarteAtivo, chamada em selectQuadra) — aqui só sobra o
+  // botão de abrir um novo descarte, pro caso de ainda não haver nenhum.
+  const descarteHtml = descarteGrupo ? '' : `
+    <button class="btn-retirar-prosp" style="border-color:#8d6e63;color:#8d6e63" onclick="abrirDescarteTemporario('composicao','${qidReal}','${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}])">🗂️ Descarte temporário</button>`;
 
   // Restrição pra composição inteira (obras/difícil/etc.), sem precisar
   // marcar lote a lote. Mostra o estado "misto" quando os lotes já têm
@@ -3284,13 +3364,13 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal){
       ${restricaoComposicaoHtml}
       <div class="hist-box">${listaHtml}</div>
       <div class="hist-form">
-        <textarea id="hist-novo-${qidBase.replace(/[.~]/g,'-')}" placeholder="Registrar uma atualização (negociação, visita, retorno do corretor...)"></textarea>
+        <textarea id="hist-novo-${qidReal.replace(/[.~]/g,'-')}" placeholder="Registrar uma atualização (negociação, visita, retorno do corretor...)"></textarea>
         <div style="display:flex;gap:6px;align-items:center">
-          <select id="hist-lote-${qidBase.replace(/[.~]/g,'-')}" style="flex:1">
+          <select id="hist-lote-${qidReal.replace(/[.~]/g,'-')}" style="flex:1">
             <option value="">Sem lote específico</option>
             ${opcoesLotes}
           </select>
-          <button onclick="salvarHistoricoManualUI('${qidBase}')">+ Adicionar</button>
+          <button onclick="salvarHistoricoManualUI('${qidReal}')">+ Adicionar</button>
         </div>
       </div>
     </div>`;
@@ -3496,20 +3576,18 @@ async function abrirModalProspeccao(qid, subId){
   document.getElementById('presp-endereco').value = 'Buscando endereço de referência...';
 
   const corpoBase = (endereco, linkMaps) =>
-`Olá!
+`Olá! Tudo bem?
 
-Poderia, por gentileza, levantar essa área junto aos proprietários? Segue o resumo da composição:
+Poderiam, por gentileza, levantar essa área junto aos proprietários? Segue o resumo da composição:
 
 • Quadra fiscal: ${q.id}
 • Bairro: ${q.bairro}
-• Lotes: ${sub.lotes.map(l=>`${q.id.split('-')[0]}.${l}`).join(', ')}
+• Lotes: ${sub.lotes.join(', ')}
 • Área total: ${sub.area.toLocaleString('pt-BR')} m²${endereco?`
 • Endereço de referência: ${endereco}`:''}
 • Ver no Google Maps: ${linkMaps}
 
-Fico no aguardo do retorno.
-
-Obrigado!`;
+Ficamos no aguardo de um retorno.`;
 
   const qidBase = q.id.split('-')[0];
   const centro = centroDaComposicao(qidBase, sub);
@@ -4013,7 +4091,7 @@ function corpoParaHtmlEmail(texto, imagemDataUrl){
   // serif padrão do navegador (Times New Roman) em vez do padrão do Outlook
   // — pior do que o problema original. Aptos é o padrão atual do Outlook;
   // os fallbacks cobrem quem ainda está em Calibri/Segoe.
-  return `<div style="font-family:Aptos,Calibri,'Segoe UI',Arial,sans-serif;font-size:11pt;color:#1a1a1a;line-height:1.45">${html}</div>`;
+  return `<div style="font-family:Aptos,Calibri,'Segoe UI',Arial,sans-serif;font-size:12pt;color:#000000;line-height:1.45">${html}</div>`;
 }
 
 // Copia o corpo (HTML real + fallback em texto puro) pra área de
@@ -5145,7 +5223,11 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     // do dicionário, que agora é composta só pra evitar sobrescrita
     const st=findSubById(layer._yunySubId, layer._yunyBairro);
     if (st) {
-      const _c= corComposicao(layer._yunySubId, st.tipo==='restrito' ? corComposicaoRestrita(st.parentId.split('-')[0], st.lotes) : scoreColor(st.score));
+      const qidBaseLayer = st.parentId.split('-')[0];
+      const corBase = st.tipo==='restrito'
+        ? corComposicaoRestrita(qidBaseLayer, st.lotes)
+        : (temEmpreendimentoSobreposto(qidBaseLayer, st.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(st.score));
+      const _c= corComposicao(layer._yunySubId, corBase);
       const _sel = layer._yunySubId===selectedSubId && layer._yunyBairro===q.bairro;
       const _style={color:_c,weight:_sel?2.5:1.5,fillColor:_c,fillOpacity:_sel?0.55:0.3,dashArray:_sel?null:'3,2'};
       if(layer.setStyle) layer.setStyle(_style);
@@ -5188,6 +5270,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <div class="dp-sql">Quadra ${_stats.subId} <span style="font-size:10px;background:${corComposicaoRestrita(q.id.split('-')[0],_stats.lotes)};color:#fff;border-radius:3px;padding:1px 6px">${labelRestricao}</span></div>
       <div class="dp-sub">${q.bairro} ${zonePill(q.zona)}</div>
     </div>
+    ${htmlAvisoDescarteAtivo(q.id)}
     <div class="actions" style="padding-bottom:0">
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
@@ -5211,6 +5294,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <div class="dp-sql">Quadra ${_stats.subId}${_stats.dividido?` <span style="font-size:10px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 6px">parte ${_stats.subId.split('~')[1]}</span>`:''}</div>
       <div class="dp-sub">${q.bairro} ${zonePill(qz.zona)}</div>
     </div>
+    ${htmlAvisoDescarteAtivo(q.id)}
     <div class="actions" style="padding-bottom:0">
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
