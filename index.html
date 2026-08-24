@@ -2467,10 +2467,12 @@ function findSubById(subId, bairroHint) {
 const CORES_RESTRICAO = {
   obras: '#9e9e9e', naoedificavel: '#9e9e9e',
   dificil: '#8d6e63', futuro: '#8d6e63', descarte: '#8d6e63',
+  retirado_prospeccao: '#78909c',
 };
 const LABEL_RESTRICAO = {
   obras: 'obras', naoedificavel: 'não edificável',
   dificil: 'difícil', futuro: 'futuro lanç.', descarte: 'descarte', restrito: 'restrito',
+  retirado_prospeccao: 'retirado da composição',
 };
 function corComposicaoRestrita(qidBase, lotes) {
   // cada subgrupo restrito agora é homogêneo (um tipo de restrição só —
@@ -2813,33 +2815,70 @@ async function removerProspeccaoAtiva(subId){
 // lotes e recalcula a área; se não sobrar nenhum lote, remove a
 // prospecção inteira. Usada tanto pelo botão manual (retirar 1 lote)
 // quanto automaticamente quando um lote em prospecção recebe descarte.
-async function removerLotesDaProspeccao(qidBase, lotesParaRemover){
-  const lotesSet = new Set(lotesParaRemover);
-  const entradasAfetadas = Object.keys(PROSPECCAO_STATUS_CACHE).filter(subId =>
-    subId === qidBase || subId.startsWith(qidBase + '~'));
-  for (const subId of entradasAfetadas) {
-    const dados = PROSPECCAO_STATUS_CACHE[subId];
-    const restantes = dados.lotes.filter(l => !lotesSet.has(l));
-    if (restantes.length === dados.lotes.length) continue; // esse subId não tinha nenhum desses lotes
-    const removidos = dados.lotes.filter(l => lotesSet.has(l));
-    if (restantes.length === 0) {
-      await removerProspeccaoAtiva(subId);
-      await adicionarHistoricoComposicao(subId, `Prospecção retirada (lote${removidos.length===1?'':'s'} removido${removidos.length===1?'':'s'}: ${removidos.join(', ')} — nenhum lote restante).`, null);
-    } else {
-      let novaArea = 0;
-      restantes.forEach(l => { novaArea += LOTES_AREA[`${qidBase}.${l}`] || 0; });
-      await marcarProspeccaoAtiva(subId, {...dados, lotes: restantes, area: Math.round(novaArea)});
-      await adicionarHistoricoComposicao(subId, `Lote${removidos.length===1?'':'s'} removido${removidos.length===1?'':'s'} do envio de prospecção: ${removidos.join(', ')}.`, null);
+// Depois de EXCLUIR fisicamente um ou mais lotes de uma composição (via
+// STATUS_LOTE_CACHE — obras, difícil, descarte, retirado_prospeccao etc.),
+// migra qualquer prospecção ativa que cobria esses lotes pro(s) novo(s)
+// pedaço(s) que a composição virou depois da exclusão (getSubGroups() já
+// recalcula tudo ao vivo a partir do STATUS_LOTE_CACHE atualizado — se o
+// lote excluído estava no meio, a composição se divide em duas; se era
+// de canto, sobra uma peça só, sem aquele lote). Sem essa migração, a
+// prospecção ficava "presa" no subId antigo, que não bate com nenhum
+// pedaço atual — e a composição parava de aparecer em azul, mesmo quando
+// a parte que sobrou continua, sim, em prospecção ativa.
+async function migrarProspeccaoAposExclusao(qidBase, bairro, lotesExcluidos, motivoHistorico){
+  const lotesExcluidosSet = new Set(lotesExcluidos);
+  const subIdsAfetados = new Set();
+  lotesExcluidos.forEach(loteNum => {
+    prospeccoesComLote(qidBase, loteNum).forEach(subId => subIdsAfetados.add(subId));
+  });
+  if (!subIdsAfetados.size) return; // nenhuma prospecção ativa cobria esses lotes — nada a migrar
+
+  const idComposicao = composicaoDoLote(qidBase, lotesExcluidos[0]);
+  const q = QUADRAS.find(x => x.id === idComposicao && x.bairro === bairro);
+  if (!q) return;
+  const novosSubs = getSubGroups(q).filter(s => s.tipo === 'ativo');
+
+  for (const subIdAntigo of subIdsAfetados) {
+    const dados = PROSPECCAO_STATUS_CACHE[subIdAntigo];
+    if (!dados) continue;
+    await removerProspeccaoAtiva(subIdAntigo);
+    const lotesRestantesEsperados = new Set((dados.lotes||[]).filter(l => !lotesExcluidosSet.has(l)));
+    if (!lotesRestantesEsperados.size) continue; // não sobrou lote nenhum dessa prospecção
+    for (const novoSub of novosSubs) {
+      const todosCobertos = novoSub.lotes.length>0 && novoSub.lotes.every(l => lotesRestantesEsperados.has(l));
+      if (todosCobertos) {
+        await marcarProspeccaoAtiva(novoSub.subId, {...dados, subId: novoSub.subId, lotes: novoSub.lotes, area: novoSub.area});
+        await adicionarHistoricoComposicao(novoSub.subId, motivoHistorico, null);
+      }
     }
   }
+}
+
+// Retira um lote de VERDADE da composição (não só da lista salva da
+// prospecção) — marca o status 'retirado_prospeccao', que exclui o lote
+// da composição na próxima vez que getSubGroups() rodar (mesmo mecanismo
+// já usado por obras/difícil/etc.), e migra qualquer prospecção ativa
+// pro(s) pedaço(s) recalculado(s).
+async function retirarLoteDaComposicaoAtiva(sql, qidBase, bairro){
+  const loteNum = sql.split('.')[2];
+  const obsAtual = (STATUS_LOTE_CACHE[sql]||{}).obs || '';
+  STATUS_LOTE_CACHE[sql] = { id: sql, status: 'retirado_prospeccao', obs: obsAtual };
+  if (_fbAtivo) { try { await _fbDb.ref('lotes_status/'+sqlToFbKey(sql)).set({status:'retirado_prospeccao', obs: obsAtual}); } catch(e){ console.warn(e); } }
+
+  await migrarProspeccaoAposExclusao(qidBase, bairro, [loteNum],
+    `Lote ${sql} retirado da composição — área recalculada.`);
+
   renderQuadraMarkers(); renderQuadraList();
-  if (selectedQid) { try { selectQuadra(selectedQid, selectedSubId, true); } catch(e) {} }
+  try { if (selectedQid) selectQuadra(selectedQid, selectedSubId, true); } catch(e) { closeDetail(); }
+  mostrarToast('Lote retirado da composição — área e ficha recalculadas.');
 }
 // Composições/subIds que têm o lote informado atualmente incluído numa
-// prospecção ativa (pode haver mais de uma parte, com sufixo ~N)
+// prospecção ativa. Precisa cobrir: a quadra base exata ("016.074"), suas
+// variantes permanentes com sufixo -b/-c ("016.074-b") e qualquer divisão
+// dinâmica por zona/restrição em cima delas ("016.074~1", "016.074-b~1").
 function prospeccoesComLote(qidBase, lote){
   return Object.keys(PROSPECCAO_STATUS_CACHE).filter(subId =>
-    (subId === qidBase || subId.startsWith(qidBase + '~')) &&
+    (subId === qidBase || subId.startsWith(qidBase + '-') || subId.startsWith(qidBase + '~')) &&
     (PROSPECCAO_STATUS_CACHE[subId].lotes||[]).includes(lote));
 }
 
@@ -3151,8 +3190,8 @@ async function processarExpiracaoDescartes(){
 
 // ── UI: iniciar/cancelar descarte temporário (composição ou lote) ──────
 let _descarteAtual = null;
-function abrirDescarteTemporario(escopo, idPrincipal, qidBase, lotes){
-  _descarteAtual = {escopo, idPrincipal, qidBase, lotes};
+function abrirDescarteTemporario(escopo, idPrincipal, qidBase, lotes, bairro){
+  _descarteAtual = {escopo, idPrincipal, qidBase, lotes, bairro};
   document.getElementById('descarte-motivo').value = '';
   document.getElementById('descarte-overlay').classList.add('on');
 }
@@ -3163,7 +3202,7 @@ function fecharDescarteTemporario(){
 async function confirmarDescarteTemporario(){
   const motivo = document.getElementById('descarte-motivo').value.trim();
   if (!motivo) { mostrarToast('Descreva o motivo do descarte temporário.'); return; }
-  const {escopo, idPrincipal, qidBase, lotes} = _descarteAtual;
+  const {escopo, idPrincipal, qidBase, lotes, bairro} = _descarteAtual;
   const registro = await aplicarDescarteTemporario(escopo, idPrincipal, qidBase, lotes, motivo);
   const loteTexto = escopo==='lote' ? `${qidBase}.${lotes[0]}` : null;
   // Histórico ancorado na composição PERMANENTE certa: pra escopo
@@ -3174,9 +3213,12 @@ async function confirmarDescarteTemporario(){
   const idComposicaoHistorico = escopo==='composicao' ? idPrincipal : composicaoDoLote(qidBase, lotes[0]);
   await adicionarHistoricoComposicao(idComposicaoHistorico,
     `Descarte temporário registrado — motivo: ${motivo} (volta a ficar disponível em ${formatarDataHistorico(registro.dataExpira)})`, loteTexto);
-  if (PROSPECCAO_STATUS_CACHE[qidBase] || Object.keys(PROSPECCAO_STATUS_CACHE).some(k=>k.startsWith(qidBase+'~'))) {
-    await removerLotesDaProspeccao(qidBase, lotes);
-  }
+  // O descarte já exclui o(s) lote(s) fisicamente da composição (mesmo
+  // mecanismo de obras/difícil/etc. — ver STATUS_LOTE_CACHE em
+  // aplicarDescarteTemporario/toggleLoteStatus); só falta migrar qualquer
+  // prospecção ativa pro(s) pedaço(s) que sobrou(aram) depois do recálculo.
+  await migrarProspeccaoAposExclusao(qidBase, bairro, lotes,
+    `Descarte temporário aplicado (${motivo}) — área da composição recalculada.`);
   fecharDescarteTemporario();
   renderQuadraMarkers(); renderQuadraList();
   try { if (selectedQid) selectQuadra(selectedQid, selectedSubId, true); } catch(e) { closeDetail(); }
@@ -3213,7 +3255,7 @@ function escapeHtmlHistorico(s){
 // Lista de lotes com os botões de restrição, proprietário e observação —
 // compartilhada entre a ficha normal, a ficha "toda restrita" e a página
 // dedicada de restrições (pra não manter três cópias do mesmo HTML)
-function htmlListaRestricoesLotes(lotes, qidBase, groupId){
+function htmlListaRestricoesLotes(lotes, qidBase, groupId, bairro){
   return lotes.map(l=>{
     const sql = `${qidBase}.${l}`;
     const stL = STATUS_LOTE_CACHE[sql] || {};
@@ -3228,14 +3270,14 @@ function htmlListaRestricoesLotes(lotes, qidBase, groupId){
         <button style="flex:1;font-size:10px;padding:3px 4px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:${stL.status==='futuro'?'#8d6e63':'#fff'};color:${stL.status==='futuro'?'#fff':'#555'}"
           onclick="toggleLoteStatus('${sql}','futuro','${groupId}')">🏢 Futuro lanç.</button>
         <button style="flex:1;font-size:10px;padding:3px 4px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:${stL.status==='descarte'?'#8d6e63':'#fff'};color:${stL.status==='descarte'?'#fff':'#555'}"
-          onclick="${stL.status==='descarte' ? `cancelarDescarteAntecipado('${sql}')` : `abrirDescarteTemporario('lote','${sql}','${qidBase}',['${l}'])`}">🗂️ Descarte</button>
+          onclick="${stL.status==='descarte' ? `cancelarDescarteAntecipado('${sql}')` : `abrirDescarteTemporario('lote','${sql}','${qidBase}',['${l}'],'${bairro.replace(/'/g,"\\'")}')`}">🗂️ Descarte</button>
         <button style="flex:1;font-size:10px;padding:3px 4px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:${stL.status==='naoedificavel'?'#8a8a8a':'#fff'};color:${stL.status==='naoedificavel'?'#fff':'#555'}"
           onclick="toggleLoteStatus('${sql}','naoedificavel','${groupId}')">🌳 Não Edif.</button>
       </div>
       ${htmlProprietario(sql)}
       ${prospeccoesComLote(qidBase, l).length ? `<div style="margin:2px 0 6px">
         <button style="width:100%;font-size:10px;padding:3px 6px;border-radius:4px;border:1px solid #1565c0;color:#1565c0;background:#eef4fc;cursor:pointer"
-          onclick="removerLotesDaProspeccao('${qidBase}',['${l}'])">↩️ Retirar este lote da prospecção</button>
+          onclick="retirarLoteDaComposicaoAtiva('${sql}','${qidBase}','${bairro.replace(/'/g,"\\'")}')">↩️ Retirar este lote da composição</button>
       </div>` : ''}
       ${stL.status==='futuro' ? (()=>{
         const reg = FUTURO_VERIFICACAO_CACHE[sql];
@@ -3273,7 +3315,7 @@ function abrirPaginaRestricoes(qid, subId){
       <div style="font-size:11px;color:#888;margin-bottom:4px">
         ${stats.n} lote${stats.n===1?'':'s'} — clique num lote no mapa ou marque abaixo
       </div>
-      ${htmlListaRestricoesLotes(stats.lotes, qidBase, qid)}
+      ${htmlListaRestricoesLotes(stats.lotes, qidBase, qid, q.bairro)}
     </div>`;
 }
 
@@ -3298,7 +3340,7 @@ function htmlAvisoDescarteAtivo(idComposicao){
       <button class="btn-retirar-prosp" onclick="cancelarDescarteAntecipado('${idComposicao}')">↩️ Cancelar descarte antecipadamente</button>
     </div>`;
 }
-function htmlSecaoHistorico(subId, lotes, qidBase, qidReal){
+function htmlSecaoHistorico(subId, lotes, qidBase, qidReal, bairro){
   const status = PROSPECCAO_STATUS_CACHE[subId];
   // Cobertura parcial: acontece quando algum lote foi retirado manualmente
   // da prospecção (removerLotesDaProspeccao encolhe status.lotes), mas a
@@ -3336,7 +3378,7 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal){
   // htmlAvisoDescarteAtivo, chamada em selectQuadra) — aqui só sobra o
   // botão de abrir um novo descarte, pro caso de ainda não haver nenhum.
   const descarteHtml = descarteGrupo ? '' : `
-    <button class="btn-retirar-prosp" style="border-color:#8d6e63;color:#8d6e63" onclick="abrirDescarteTemporario('composicao','${qidReal}','${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}])">🗂️ Descarte temporário</button>`;
+    <button class="btn-retirar-prosp" style="border-color:#8d6e63;color:#8d6e63" onclick="abrirDescarteTemporario('composicao','${qidReal}','${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],'${bairro.replace(/'/g,"\\'")}')">🗂️ Descarte temporário</button>`;
 
   // Restrição pra composição inteira (obras/difícil/etc.), sem precisar
   // marcar lote a lote. Mostra o estado "misto" quando os lotes já têm
@@ -3516,6 +3558,12 @@ async function marcarStatusComposicao(qidBase, lotes, status, groupId){
     return Promise.resolve();
   }));
   mostrarToast(status ? 'Restrição aplicada a todos os lotes da composição.' : 'Restrição removida de todos os lotes da composição.');
+  // Lotes que passaram a ter restrição saem fisicamente da composição —
+  // migra qualquer prospecção ativa pro(s) pedaço(s) recalculado(s).
+  if (status) {
+    await migrarProspeccaoAposExclusao(qidBase, selectedBairro, lotes,
+      `Restrição "${LABEL_RESTRICAO[status]||status}" aplicada em massa — área da composição recalculada.`);
+  }
 }
 
 async function toggleLoteStatus(sql, newStatus, groupId) {
@@ -3532,6 +3580,14 @@ async function toggleLoteStatus(sql, newStatus, groupId) {
   // sempre que o lote entra ou sai desse status específico
   if (status === 'futuro' && atual !== 'futuro') await marcarFuturoLancamento(sql, groupId);
   else if (atual === 'futuro' && status !== 'futuro') await removerFuturoLancamentoTracking(sql, groupId);
+  // Idem: lote que passou a ter uma restrição nova sai fisicamente da
+  // composição — migra qualquer prospecção ativa pro(s) pedaço(s)
+  // recalculado(s), mesmo mecanismo do "retirar da composição" e do descarte.
+  if (status && status !== atual) {
+    const qidBaseLote = sql.split('.').slice(0,2).join('.');
+    await migrarProspeccaoAposExclusao(qidBaseLote, selectedBairro, [sql.split('.')[2]],
+      `Lote ${sql} marcado como "${LABEL_RESTRICAO[status]||status}" — área da composição recalculada.`);
+  }
 }
 
 async function saveLoteObs(sql, groupId, valorDireto) {
@@ -3582,6 +3638,16 @@ async function abrirModalProspeccao(qid, subId){
 
   _prospeccaoAtual = {q, sub, imagem: null};
 
+  // Pergunta "enviar tudo ou retirar lote(s) antes": sempre reaparece do
+  // zero (estado inicial: pergunta visível, checklist escondida) — tanto
+  // na primeira abertura quanto quando reabrimos depois de recalcular.
+  document.getElementById('presp-pergunta-lotes').style.display = 'block';
+  document.getElementById('presp-checklist-lotes').style.display = 'none';
+  document.getElementById('presp-checklist-itens').innerHTML = sub.lotes.map(l =>
+    `<label style="display:flex;align-items:center;gap:4px;background:#fff;border:1px solid #ddd;border-radius:4px;padding:3px 6px;cursor:pointer">
+      <input type="checkbox" checked data-lote="${l}"> ${l}
+    </label>`).join('');
+
   // A imagem do e-mail agora vem exclusivamente da captura de tela do mapa
   // (botão "Capturar imagem do mapa"), então o formulário começa sem imagem.
   aplicarImagemNoFormulario(null);
@@ -3626,6 +3692,47 @@ Ficamos no aguardo de um retorno.`;
   } else {
     document.getElementById('presp-endereco').value = '';
   }
+}
+function responderPerguntaLotesProspeccao(enviarTudo){
+  document.getElementById('presp-pergunta-lotes').style.display = 'none';
+  document.getElementById('presp-checklist-lotes').style.display = enviarTudo ? 'none' : 'block';
+}
+// Exclui fisicamente os lotes desmarcados (mesmo mecanismo de
+// retirarLoteDaComposicaoAtiva — reaproveita, já que ainda não existe
+// nenhuma prospecção ativa nesse ponto, então a "migração" simplesmente
+// não encontra nada a migrar e não faz nada além da exclusão) e reabre o
+// modal já com a composição recalculada (pode ter dividido em duas
+// partes, se o lote retirado era do meio).
+async function confirmarExclusaoAntesDeEnviar(){
+  const { q } = _prospeccaoAtual;
+  const qidBase = q.id.split('-')[0];
+  const checkboxes = Array.from(document.querySelectorAll('#presp-checklist-itens input[type=checkbox]'));
+  const lotesParaRetirar = checkboxes.filter(c=>!c.checked).map(c=>c.dataset.lote);
+  const lotesMantidos = checkboxes.filter(c=>c.checked).map(c=>c.dataset.lote);
+  if (!lotesParaRetirar.length) {
+    mostrarToast('Nenhum lote desmarcado — nada a retirar.');
+    document.getElementById('presp-checklist-lotes').style.display = 'none';
+    return;
+  }
+  if (!lotesMantidos.length) {
+    mostrarToast('Não pode retirar todos os lotes — não sobraria nenhuma composição pra enviar.');
+    return;
+  }
+  document.getElementById('presp-status').textContent = 'Recalculando composição...';
+  for (const l of lotesParaRetirar) {
+    await retirarLoteDaComposicaoAtiva(`${qidBase}.${l}`, qidBase, q.bairro);
+  }
+  const novosSubs = getSubGroups(q).filter(s => s.tipo === 'ativo');
+  const novoSub = novosSubs.find(s => s.lotes.length && s.lotes.every(l => lotesMantidos.includes(l)))
+    || novosSubs.sort((a,b)=>b.n-a.n)[0];
+  document.getElementById('presp-status').textContent = '';
+  if (!novoSub) {
+    mostrarToast('Não sobrou nenhuma composição válida depois da exclusão.');
+    fecharModalProspeccao();
+    return;
+  }
+  await abrirModalProspeccao(q.id, novoSub.subId);
+  mostrarToast('Composição recalculada — confira os dados atualizados abaixo.');
 }
 function fecharModalProspeccao(){
   document.getElementById('presp-overlay').classList.remove('on');
@@ -4197,12 +4304,12 @@ function lotePopupHTML(sql, groupId) {
       <button style="flex:1;min-width:56px;font-size:10.5px;padding:4px 4px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:${stL.status==='futuro'?'#8d6e63':'#fff'};color:${corTexto('futuro')}"
         onclick="toggleLoteStatus('${sql}','futuro','${groupId}')">🏢 Futuro lanç.</button>
       <button style="flex:1;min-width:56px;font-size:10.5px;padding:4px 4px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:${stL.status==='descarte'?'#8d6e63':'#fff'};color:${corTexto('descarte')}"
-        onclick="${stL.status==='descarte' ? `cancelarDescarteAntecipado('${sql}')` : `abrirDescarteTemporario('lote','${sql}','${sql.split('.').slice(0,2).join('.')}',['${sql.split('.')[2]}'])`}">🗂️ Descarte</button>
+        onclick="${stL.status==='descarte' ? `cancelarDescarteAntecipado('${sql}')` : `abrirDescarteTemporario('lote','${sql}','${sql.split('.').slice(0,2).join('.')}',['${sql.split('.')[2]}'],selectedBairro)`}">🗂️ Descarte</button>
       <button style="flex:1;min-width:56px;font-size:10.5px;padding:4px 4px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:${stL.status==='naoedificavel'?'#8a8a8a':'#fff'};color:${corTexto('naoedificavel')}"
         onclick="toggleLoteStatus('${sql}','naoedificavel','${groupId}')">🌳 Não Edif.</button>
     </div>
     ${prospeccoesComLote(groupId.split('-')[0], sql.split('.')[2]).length ? `<button style="width:100%;font-size:10px;padding:4px 4px;margin-bottom:6px;border-radius:4px;border:1px solid #1565c0;color:#1565c0;background:#eef4fc;cursor:pointer"
-      onclick="removerLotesDaProspeccao('${groupId.split('-')[0]}',['${sql.split('.')[2]}'])">↩️ Retirar este lote da prospecção</button>` : ''}
+      onclick="retirarLoteDaComposicaoAtiva('${sql}','${groupId.split('-')[0]}',selectedBairro)">↩️ Retirar este lote da composição</button>` : ''}
     <textarea id="popup-obs-${safeId}" onchange="saveLoteObs('${sql}','${groupId}',this.value)"
       placeholder="Observação do lote..."
       style="width:100%;min-height:40px;border:1px solid #eee;border-radius:4px;padding:4px 6px;font-size:11px;font-family:inherit;color:#333;resize:vertical"
@@ -5299,9 +5406,9 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     </div>
     <div class="dp-sec">
       <div class="dp-st">Restrições e observações por lote</div>
-      ${htmlListaRestricoesLotes(_stats.lotes, q.id.split('-')[0], q.id)}
+      ${htmlListaRestricoesLotes(_stats.lotes, q.id.split('-')[0], q.id, q.bairro)}
     </div>
-    ${htmlSecaoHistorico(_stats.subId, _stats.lotes, q.id.split('-')[0], q.id)}`;
+    ${htmlSecaoHistorico(_stats.subId, _stats.lotes, q.id.split('-')[0], q.id, q.bairro)}`;
     renderQuadraList();
     return;
   }
@@ -5322,7 +5429,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <div style="font-size:12px;color:#555;margin-top:4px">${_stats.n} lotes${_stats.dividido?` (de ${q.n} originais)`:''} · score ${_stats.score} <span style="font-size:11px;color:#aaa">(negociação: ${negSc(_stats.n)}/20 pts)</span></div>
       <div class="score-track"><div class="score-fill" style="width:${Math.min(100,_stats.area/500)}%;background:#7b1fa2"></div></div>
     </div>
-    ${htmlSecaoHistorico(_stats.subId, _stats.lotes, q.id.split('-')[0], q.id)}
+    ${htmlSecaoHistorico(_stats.subId, _stats.lotes, q.id.split('-')[0], q.id, q.bairro)}
     <div class="dp-sec">
       <div class="dp-st">Dados da quadra</div>
       <div class="dp-r"><span class="dp-rl">Quadra fiscal</span><span class="dp-rv">${q.id}</span></div>
@@ -6115,6 +6222,18 @@ iniciarAutenticacao();
   <div class="presp-modal">
     <h3>📧 Enviar Prospecção</h3>
     <div class="sub" id="presp-sub"></div>
+    <div id="presp-pergunta-lotes" style="margin:8px 0 12px;padding:10px;background:#f7f7f7;border-radius:6px;font-size:12px">
+      <div style="font-weight:600;margin-bottom:6px;color:#333">Enviar toda a área desta composição?</div>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="presp-btn-cancel" style="flex:1" onclick="responderPerguntaLotesProspeccao(true)">Sim, enviar tudo</button>
+        <button type="button" class="presp-btn-cancel" style="flex:1" onclick="responderPerguntaLotesProspeccao(false)">Retirar lote(s) antes</button>
+      </div>
+    </div>
+    <div id="presp-checklist-lotes" style="display:none;margin:0 0 12px;padding:10px;background:#fdf6e3;border:1px solid #e8d9a0;border-radius:6px;font-size:12px">
+      <div style="margin-bottom:6px;color:#7a6323">Desmarque os lotes que você quer <strong>retirar</strong> desta composição antes de enviar — a composição será recalculada (pode até dividir em duas partes, se o lote retirado for do meio):</div>
+      <div id="presp-checklist-itens" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+      <button type="button" class="presp-btn-send" style="width:100%" onclick="confirmarExclusaoAntesDeEnviar()">Recalcular composição e continuar</button>
+    </div>
     <div class="presp-img-vazia" id="presp-img-vazia" tabindex="0" onpaste="colarImagemProspeccao(event)">
       <div style="font-size:26px;line-height:1">🗺️</div>
       <div style="font-weight:600;font-size:13px;color:#555;margin-top:6px">Nenhuma imagem capturada</div>
