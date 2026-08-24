@@ -4647,6 +4647,138 @@ const GEOM_MAP = {};
 // setor.quadra entre bairros vizinhos). Valor: array de grupos, cada um
 // {membros: [subId,...]} — normalmente só 1 grupo por chave.
 const VILAS_POTENCIAIS = {};
+
+// ── Vínculo manual entre composições (ou lotes) fisicamente desconectados
+// mas que fazem parte da mesma negociação — ex: duas partes de uma mesma
+// vila que não conseguimos unificar fisicamente (getSubGroups continua
+// tratando como composições separadas), mas que o Matheus quer controlar
+// juntas pra fins de "quantidade de áreas em prospecção" no dashboard e
+// pra não perder de vista que uma depende da outra. Puramente
+// organizacional — não muda score, área, VGV ou geometria de nenhuma das
+// composições envolvidas, só as agrupa visualmente/no controle.
+let VINCULOS_CACHE = {}; // grupoId -> {membros:[{tipo:'composicao',subId,bairro}], criadoEm}
+
+function grupoVinculoDoSubId(subId){
+  for (const [grupoId, dados] of Object.entries(VINCULOS_CACHE)) {
+    if ((dados.membros||[]).some(m => m.subId === subId)) return {grupoId, ...dados};
+  }
+  return null;
+}
+function statsVinculo(grupoId){
+  const grupo = VINCULOS_CACHE[grupoId];
+  if (!grupo) return null;
+  let area = 0, n = 0;
+  const detalhes = grupo.membros.map(m => {
+    const q = QUADRAS.find(x => x.id === m.subId.split('~')[0] && x.bairro === m.bairro);
+    if (!q) return null;
+    const sub = getSubGroups(q).find(s => s.subId === m.subId);
+    if (!sub) return null;
+    area += sub.area; n += sub.n;
+    return {subId: m.subId, bairro: m.bairro, area: sub.area, n: sub.n, score: sub.score};
+  }).filter(Boolean);
+  return {grupoId, area: Math.round(area), n, detalhes};
+}
+async function salvarVinculo(grupoId, membros){
+  VINCULOS_CACHE[grupoId] = {membros, criadoEm: new Date().toISOString()};
+  if (_fbAtivo) { try { await _fbDb.ref('vinculos_composicao/'+grupoId).set(VINCULOS_CACHE[grupoId]); } catch(e){ console.warn(e); } }
+}
+async function removerDoVinculo(grupoId, subId){
+  const grupo = VINCULOS_CACHE[grupoId];
+  if (!grupo) return;
+  const membrosRestantes = grupo.membros.filter(m => m.subId !== subId);
+  if (membrosRestantes.length < 2) {
+    // sobrou 0 ou 1 membro — não é mais um vínculo, apaga o grupo inteiro
+    delete VINCULOS_CACHE[grupoId];
+    if (_fbAtivo) { try { await _fbDb.ref('vinculos_composicao/'+grupoId).remove(); } catch(e){ console.warn(e); } }
+  } else {
+    await salvarVinculo(grupoId, membrosRestantes);
+  }
+  renderQuadraMarkers(); renderQuadraList();
+  if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
+  mostrarToast('Composição desvinculada.');
+}
+function iniciarSincronizacaoVinculos(){
+  return new Promise((resolve) => {
+    if (!_fbAtivo) { resolve(); return; }
+    let primeira = true;
+    _fbDb.ref('vinculos_composicao').on('value', snapshot => {
+      VINCULOS_CACHE = snapshot.val() || {};
+      if (primeira) { primeira = false; resolve(); }
+      else {
+        renderQuadraMarkers(); renderQuadraList();
+        if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
+      }
+    }, err => { avisarErroSincronizacao('vinculos_composicao', err); resolve(); });
+  });
+}
+
+// ── Modo "vincular composições": clique no mapa em vez de formulário ──
+let _modoVinculoAtivo = null;
+function iniciarModoVinculo(subIdOrigem, bairroOrigem){
+  if (_modoVinculoAtivo) return;
+  closeDetail();
+  _modoVinculoAtivo = {origemSubId: subIdOrigem, origemBairro: bairroOrigem, selecionados: [], grupoIdExistente: null};
+  const grupoExistente = grupoVinculoDoSubId(subIdOrigem);
+  if (grupoExistente) {
+    _modoVinculoAtivo.grupoIdExistente = grupoExistente.grupoId;
+    _modoVinculoAtivo.selecionados = grupoExistente.membros.filter(m => m.subId !== subIdOrigem);
+  }
+  document.getElementById('vinculo-barra').style.display = 'flex';
+  atualizarContadorVinculo();
+  renderQuadraMarkers();
+  _destacarSelecionadosVinculo();
+}
+function processarCliqueModoVinculo(e){
+  const candidatos = candidatosNoClique(e);
+  const cand = candidatos.find(c => c.tipo === 'composicao');
+  if (!cand) { mostrarToast('Clique em cima de uma composição pra vincular a ela.'); return; }
+  if (cand.subId === _modoVinculoAtivo.origemSubId) { mostrarToast('Essa já é a composição de origem do vínculo.'); return; }
+  const idx = _modoVinculoAtivo.selecionados.findIndex(m => m.subId === cand.subId);
+  if (idx >= 0) {
+    _modoVinculoAtivo.selecionados.splice(idx, 1);
+    mostrarToast(`Quadra ${cand.subId} removida da seleção.`);
+  } else {
+    _modoVinculoAtivo.selecionados.push({tipo:'composicao', subId: cand.subId, bairro: cand.bairro});
+    mostrarToast(`Quadra ${cand.subId} adicionada ao vínculo.`);
+  }
+  atualizarContadorVinculo();
+  renderQuadraMarkers();
+  _destacarSelecionadosVinculo();
+}
+function _destacarSelecionadosVinculo(){
+  if (!_modoVinculoAtivo) return;
+  const origLayer = quadraPolygons[_modoVinculoAtivo.origemBairro+'::'+_modoVinculoAtivo.origemSubId];
+  if (origLayer) origLayer.setStyle({color:'#f9a825', weight:4, dashArray:null});
+  _modoVinculoAtivo.selecionados.forEach(m => {
+    const layer = quadraPolygons[m.bairro+'::'+m.subId];
+    if (layer) layer.setStyle({color:'#f9a825', weight:4, dashArray:null});
+  });
+}
+function atualizarContadorVinculo(){
+  const el = document.getElementById('vinculo-contador');
+  if (el) el.textContent = `${_modoVinculoAtivo.selecionados.length} vinculada(s)`;
+}
+async function concluirModoVinculo(){
+  const m = _modoVinculoAtivo;
+  if (!m) return;
+  if (!m.selecionados.length) { mostrarToast('Nenhuma composição selecionada — nada a vincular.'); cancelarModoVinculo(); return; }
+  const todosMembros = [{tipo:'composicao', subId:m.origemSubId, bairro:m.origemBairro}, ...m.selecionados];
+  const grupoId = m.grupoIdExistente || `vinc_${Date.now()}`;
+  const origemSubId = m.origemSubId, origemBairro = m.origemBairro;
+  await salvarVinculo(grupoId, todosMembros);
+  _sairModoVinculo();
+  renderQuadraMarkers(); renderQuadraList();
+  mostrarToast('Vínculo salvo com sucesso.');
+  selectQuadra(origemSubId.split('~')[0], origemSubId, false, origemBairro);
+}
+function cancelarModoVinculo(){
+  _sairModoVinculo();
+}
+function _sairModoVinculo(){
+  document.getElementById('vinculo-barra').style.display = 'none';
+  _modoVinculoAtivo = null;
+  renderQuadraMarkers();
+}
 // Lotes que têm um empreendimento (GeoImóvel) sobreposto — calculado
 // offline via point-in-polygon do lat/lon do empreendimento contra a
 // geometria do lote (com tolerância de ~25m pra imprecisão de
@@ -5521,7 +5653,22 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     <div class="actions" style="padding-bottom:0">
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
+      <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
+    ${(() => {
+      const grupoVinc = grupoVinculoDoSubId(_stats.subId);
+      if (!grupoVinc) return '';
+      const statsV = statsVinculo(grupoVinc.grupoId);
+      const outros = statsV.detalhes.filter(d => d.subId !== _stats.subId);
+      return `<div style="margin:0 12px 10px;padding:9px 10px;background:#fff8e1;border:1px solid #f9a825;border-radius:6px;font-size:11px;color:#6d4c00;line-height:1.5">
+        🔗 Esta composição está <strong>vinculada</strong> a ${outros.length} outra${outros.length===1?'':'s'} composiç${outros.length===1?'ão':'ões'} da mesma negociação
+        (total combinado: ${statsV.area.toLocaleString('pt-BR')} m², ${statsV.n} lotes ao todo):
+        <ul style="margin:6px 0 0;padding-left:18px">
+          ${outros.map(o => `<li><a href="#" onclick="selectQuadra('${o.subId.split('~')[0]}','${o.subId}',false,'${o.bairro.replace(/'/g,"\\'")}');return false;" style="color:#6d4c00">${o.subId} — ${o.bairro} (${o.area.toLocaleString('pt-BR')} m²)</a></li>`).join('')}
+        </ul>
+        <button class="act-btn" style="margin-top:6px;padding:3px 8px;font-size:10.5px" onclick="removerDoVinculo('${grupoVinc.grupoId}','${_stats.subId}')">Desvincular esta composição</button>
+      </div>`;
+    })()}
     <div class="score-box" style="background:#f2f2f2">
       <div class="score-lbl">Lotes com restrição — ${labelRestricao}</div>
       <div class="score-num" style="color:#757575">${_stats.area.toLocaleString('pt-BR')}<span style="font-size:13px;color:#aaa"> m²</span></div>
@@ -5545,7 +5692,22 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     <div class="actions" style="padding-bottom:0">
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
+      <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
+    ${(() => {
+      const grupoVinc = grupoVinculoDoSubId(_stats.subId);
+      if (!grupoVinc) return '';
+      const statsV = statsVinculo(grupoVinc.grupoId);
+      const outros = statsV.detalhes.filter(d => d.subId !== _stats.subId);
+      return `<div style="margin:0 12px 10px;padding:9px 10px;background:#fff8e1;border:1px solid #f9a825;border-radius:6px;font-size:11px;color:#6d4c00;line-height:1.5">
+        🔗 Esta composição está <strong>vinculada</strong> a ${outros.length} outra${outros.length===1?'':'s'} composiç${outros.length===1?'ão':'ões'} da mesma negociação
+        (total combinado: ${statsV.area.toLocaleString('pt-BR')} m², ${statsV.n} lotes ao todo):
+        <ul style="margin:6px 0 0;padding-left:18px">
+          ${outros.map(o => `<li><a href="#" onclick="selectQuadra('${o.subId.split('~')[0]}','${o.subId}',false,'${o.bairro.replace(/'/g,"\\'")}');return false;" style="color:#6d4c00">${o.subId} — ${o.bairro} (${o.area.toLocaleString('pt-BR')} m²)</a></li>`).join('')}
+        </ul>
+        <button class="act-btn" style="margin-top:6px;padding:3px 8px;font-size:10.5px" onclick="removerDoVinculo('${grupoVinc.grupoId}','${_stats.subId}')">Desvincular esta composição</button>
+      </div>`;
+    })()}
     <div class="score-box">
       <div class="score-lbl">Potencial de composição${_stats.dividido?' (pedaço separado por restrição ou zoneamento)':''}</div>
       <div class="score-num" style="color:#7b1fa2">${_stats.area.toLocaleString('pt-BR')}<span style="font-size:13px;color:#aaa"> m²</span></div>
@@ -6007,6 +6169,7 @@ function abrirPopupLote(sql, groupId, latlng){
 
 map.on('click', function(e){
   if (_captura) return;   // no modo captura o mapa é só visual
+  if (_modoVinculoAtivo) { processarCliqueModoVinculo(e); return; }
   const candidatos = candidatosNoClique(e);
   if (candidatos.length === 0) return;
   if (candidatos.length === 1) {
@@ -6158,10 +6321,40 @@ function buildAddressPanel(lat,lon,rua,bairro){
 // DIAS_ALERTA_PROSPECCAO dias sem nenhuma atualização no histórico
 // ══════════════════════════════════════════════════════════════════════
 function construirDashboardProspeccao(){
-  const linhas = Object.values(PROSPECCAO_STATUS_CACHE).map(st => {
+  const linhasBrutas = Object.values(PROSPECCAO_STATUS_CACHE).map(st => {
     const dias = diasDesde(ultimaAtualizacaoProspeccao(st.subId));
     return {...st, dias};
-  }).sort((a,b) => (b.dias??0) - (a.dias??0));
+  });
+
+  // Composições vinculadas (ex: duas partes de uma mesma vila) contam como
+  // UMA área só no dashboard — soma a área de todas, mostra os subIds
+  // juntos, e usa a atualização mais recente entre elas.
+  const jaAgrupadas = new Set();
+  const linhas = [];
+  linhasBrutas.forEach(l => {
+    if (jaAgrupadas.has(l.subId)) return;
+    const grupoVinc = grupoVinculoDoSubId(l.subId);
+    if (grupoVinc) {
+      const membrosDoGrupo = new Set(grupoVinc.membros.map(m => m.subId));
+      const linhasDoGrupo = linhasBrutas.filter(x => membrosDoGrupo.has(x.subId));
+      linhasDoGrupo.forEach(x => jaAgrupadas.add(x.subId));
+      if (!linhasDoGrupo.length) return;
+      const area = linhasDoGrupo.reduce((s,x)=>s+(x.area||0),0);
+      const maisRecente = [...linhasDoGrupo].sort((a,b)=> new Date(b.dataEnvio)-new Date(a.dataEnvio))[0];
+      const diasMin = Math.min(...linhasDoGrupo.map(x => x.dias ?? Infinity));
+      linhas.push({
+        ...maisRecente,
+        subId: linhasDoGrupo.map(x=>x.subId).join(' + '),
+        area, dias: diasMin===Infinity ? null : diasMin,
+        _irParaQid: maisRecente.qid, _irParaSubId: maisRecente.subId,
+        vinculado: true,
+      });
+    } else {
+      jaAgrupadas.add(l.subId);
+      linhas.push({...l, _irParaQid: l.qid, _irParaSubId: l.subId});
+    }
+  });
+  linhas.sort((a,b) => (b.dias??0) - (a.dias??0));
 
   const totalAtivas = linhas.length;
   const totalAlerta = linhas.filter(l => l.dias!==null && l.dias>DIAS_ALERTA_PROSPECCAO).length;
@@ -6233,13 +6426,13 @@ function construirDashboardProspeccao(){
     const emAlerta = l.dias!==null && l.dias>DIAS_ALERTA_PROSPECCAO;
     return `
     <tr class="${emAlerta?'alerta':''}">
-      <td><strong>${l.subId}</strong></td>
+      <td><strong>${l.subId}</strong>${l.vinculado?' <span style="font-size:9px;background:#f9a825;color:#6d4c00;border-radius:3px;padding:1px 5px">🔗 vinculadas</span>':''}</td>
       <td>${l.bairro}</td>
       <td>${(l.area||0).toLocaleString('pt-BR')} m²</td>
       <td>${escapeHtmlHistorico(l.corretor)}</td>
       <td>${formatarDataHistorico(l.dataEnvio)}</td>
       <td>${l.dias===null?'—':`${l.dias} dia${l.dias===1?'':'s'}`} ${emAlerta?'<span class="dash-alerta-pill">⚠️ Atenção</span>':''}</td>
-      <td><button class="dash-row-btn" onclick="irParaComposicaoDashboard('${l.qid}','${l.subId}')">Ver composição</button></td>
+      <td><button class="dash-row-btn" onclick="irParaComposicaoDashboard('${l._irParaQid}','${l._irParaSubId}')">Ver composição</button></td>
     </tr>`;
   }).join('');
 
@@ -6306,7 +6499,7 @@ function iniciarApp(){
   currentTab='quadras';
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
-  Promise.all([iniciarSincronizacaoLotes(), iniciarSincronizacaoProspeccao(), iniciarSincronizacaoDescarte(), iniciarSincronizacaoFuturo(), iniciarSincronizacaoProprietarios(), iniciarSincronizacaoEmpreendimentoIgnorado(), carregarItbiComparaveis(), carregarDistritosIniciais()]).then(async () => {
+  Promise.all([iniciarSincronizacaoLotes(), iniciarSincronizacaoProspeccao(), iniciarSincronizacaoDescarte(), iniciarSincronizacaoFuturo(), iniciarSincronizacaoProprietarios(), iniciarSincronizacaoEmpreendimentoIgnorado(), iniciarSincronizacaoVinculos(), carregarItbiComparaveis(), carregarDistritosIniciais()]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
     // Perímetros só das regiões que NÃO vieram pré-carregadas — desenhados
     // depois de carregarDistritosIniciais() já ter marcado as 21 iniciais
@@ -6349,6 +6542,17 @@ iniciarAutenticacao();
   <span style="flex:1"></span>
   <button onclick="concluirSelecaoLotesNoMapa()" style="background:#2e7d32;color:#fff;border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-weight:600">✓ Concluir seleção</button>
   <button onclick="cancelarSelecaoLotesNoMapa()" style="background:transparent;color:#fff;border:1px solid #fff;padding:6px 14px;border-radius:5px;cursor:pointer">✕ Cancelar</button>
+</div>
+
+<!-- ── MODO VÍNCULO: ligar composições fisicamente desconectadas (ex: as
+     duas partes de uma vila) pra fins de controle/dashboard ────────── -->
+<div id="vinculo-barra" style="display:none;position:fixed;top:0;left:0;right:0;z-index:10001;background:#6d4c00;color:#fff;padding:10px 16px;align-items:center;gap:12px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.3)">
+  <span style="font-weight:700;color:#fff">YUNY</span>
+  <span>Clique em outra(s) composição(ões) no mapa pra vincular a esta (mesma negociação/vila).</span>
+  <span id="vinculo-contador" style="background:#f9a825;color:#6d4c00;padding:2px 10px;border-radius:12px;font-weight:600">0 vinculada(s)</span>
+  <span style="flex:1"></span>
+  <button onclick="concluirModoVinculo()" style="background:#2e7d32;color:#fff;border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-weight:600">✓ Salvar vínculo</button>
+  <button onclick="cancelarModoVinculo()" style="background:transparent;color:#fff;border:1px solid #fff;padding:6px 14px;border-radius:5px;cursor:pointer">✕ Cancelar</button>
 </div>
 
 <div class="presp-overlay" id="presp-overlay">
