@@ -635,14 +635,17 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <button id="bm-mapa" onclick="setBasemap('mapa')" style="border:none;padding:6px 12px;cursor:pointer;background:#2e7d32;color:#fff;font-weight:600">🗺 Mapa</button>
       <button id="bm-satelite" onclick="setBasemap('satelite')" style="border:none;padding:6px 12px;cursor:pointer;background:#fff;color:#333">🛰 Satélite</button>
     </div>
-    <!-- Imagens históricas de satélite (Esri Wayback) — só aparece com o
-         satélite ativo. As datas são de PUBLICAÇÃO do mosaico global da
-         Esri, não necessariamente a data exata da foto aérea de SP; e nem
-         toda data tem imagem diferente pra toda região (é um mosaico
-         mundial, atualizado por partes). -->
-    <div id="wayback-ctrl" style="display:none;position:absolute;top:46px;right:10px;z-index:1000;background:#fff;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.3);padding:5px 8px;font-size:11.5px">
-      <select id="wayback-select" onchange="trocarDataSatelite(this.value)" style="border:none;background:transparent;font-size:11.5px;color:#333;cursor:pointer">
-        <option value="">🕐 Atual</option>
+    <!-- Fontes alternativas de satélite — a pedido do Matheus (a versão
+         histórica não estava sendo útil: resolução baixa e sem ajudar a
+         "ver por outro ângulo" o que um prédio cobre). Agora oferece
+         fontes de satélite ATUAIS e de resolução melhor, não datas
+         antigas. GeoSampa é a ortofoto oficial da prefeitura, 10cm de
+         resolução — bem mais nítida que o mosaico global da Esri pra São
+         Paulo especificamente. -->
+    <div id="fonte-satelite-ctrl" style="display:none;position:absolute;top:46px;right:10px;z-index:1000;background:#fff;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.3);padding:5px 8px;font-size:11.5px">
+      <select id="fonte-satelite-select" onchange="trocarFonteSatelite(this.value)" style="border:none;background:transparent;font-size:11.5px;color:#333;cursor:pointer">
+        <option value="esri">🛰 Esri (padrão)</option>
+        <option value="geosampa">🏙️ GeoSampa (10cm, oficial)</option>
       </select>
     </div>
 
@@ -2197,56 +2200,49 @@ function _onTileError(){
 basemapMapa.on('tileerror', _onTileError);
 basemapSatelite.on('tileerror', _onTileError);
 
-// ── Satélite histórico (Esri World Imagery Wayback) ──
-// Mesmo provedor (Esri) do satélite atual — arquivo gratuito com mais de
-// 150 versões datadas do mosaico mundial desde fev/2014. A data é de
-// PUBLICAÇÃO do mosaico global, não necessariamente a data exata da foto
-// de São Paulo (mosaico é atualizado por regiões, não o mundo todo de
-// uma vez). Curado aqui: ~1 a cada 2 anos, todas em jul/ago (mesma
-// estação, pra comparação mais justa entre anos).
-const WAYBACK_RELEASES = [
-  {label:'2024-08-15', release:32553},
-  {label:'2021-08-11', release:51423},
-  {label:'2018-08-15', release:1858},
-  {label:'2016-07-20', release:5097},
-  {label:'2014-07-02', release:3026},
-];
+// ── Fontes alternativas de satélite (não mais histórico — resolução e
+// ângulo diferentes, a pedido do Matheus) ──
+// GeoSampa: ortofoto oficial da Prefeitura de SP, servida via WMS,
+// resolução de 10cm/20cm (bem mais nítida que o mosaico global da Esri
+// pra essa região especificamente) — gratuita, sem chave de API, mesmo
+// portal de onde já veio a base de quadra fiscal usada nesta sessão.
 const TILES_SAT_ATUAL = TILES_SAT;
-function trocarDataSatelite(releaseStr) {
+function criarCamadaGeoSampa() {
+  return L.tileLayer.wms('http://raster.geosampa.prefeitura.sp.gov.br/geoserver/ows', {
+    layers: 'geoportal:MOSAICO_ORTO_RGB_10CM_20CM',
+    format: 'image/png',
+    version: '1.3.0',
+    transparent: false,
+    attribution: 'Ortofoto: Prefeitura de São Paulo (GeoSampa)',
+    maxZoom: 21,
+    maxNativeZoom: 20,
+    crossOrigin: false, // servidor da prefeitura pode não ter CORS habilitado
+  });
+}
+function trocarFonteSatelite(fonte) {
   const estavaVisivel = map.hasLayer(basemapSatelite);
   if (estavaVisivel) map.removeLayer(basemapSatelite);
-  const novaUrl = releaseStr
-    ? `https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/${releaseStr}/{z}/{y}/{x}`
-    : TILES_SAT_ATUAL;
-  basemapSatelite = L.tileLayer(novaUrl, {attribution: ATTR_SAT, maxZoom:19, crossOrigin: TILES_COM_CORS});
+  basemapSatelite = fonte === 'geosampa'
+    ? criarCamadaGeoSampa()
+    : L.tileLayer(TILES_SAT_ATUAL, {attribution: ATTR_SAT, maxZoom: 19, crossOrigin: TILES_COM_CORS});
   basemapSatelite.on('tileerror', _onTileError);
   if (estavaVisivel) basemapSatelite.addTo(map);
 }
 function setBasemap(qual){
   _sincronizarBotoesCaptura(qual);
-  const ctrlWayback = document.getElementById('wayback-ctrl');
+  const ctrlFonteSatelite = document.getElementById('fonte-satelite-ctrl');
   if (qual==='satelite') {
     if (map.hasLayer(basemapMapa)) map.removeLayer(basemapMapa); basemapSatelite.addTo(map);
     document.getElementById('bm-satelite').style.background='#2e7d32'; document.getElementById('bm-satelite').style.color='#fff'; document.getElementById('bm-satelite').style.fontWeight='600';
     document.getElementById('bm-mapa').style.background='#fff'; document.getElementById('bm-mapa').style.color='#333'; document.getElementById('bm-mapa').style.fontWeight='400';
-    if (ctrlWayback) ctrlWayback.style.display='block';
+    if (ctrlFonteSatelite) ctrlFonteSatelite.style.display='block';
   } else {
     if (map.hasLayer(basemapSatelite)) map.removeLayer(basemapSatelite); basemapMapa.addTo(map);
     document.getElementById('bm-mapa').style.background='#2e7d32'; document.getElementById('bm-mapa').style.color='#fff'; document.getElementById('bm-mapa').style.fontWeight='600';
     document.getElementById('bm-satelite').style.background='#fff'; document.getElementById('bm-satelite').style.color='#333'; document.getElementById('bm-satelite').style.fontWeight='400';
-    if (ctrlWayback) ctrlWayback.style.display='none';
+    if (ctrlFonteSatelite) ctrlFonteSatelite.style.display='none';
   }
 }
-(function popularWaybackSelect(){
-  const sel = document.getElementById('wayback-select');
-  if (!sel) return;
-  WAYBACK_RELEASES.forEach(r => {
-    const opt = document.createElement('option');
-    opt.value = r.release;
-    opt.textContent = '🕐 ' + r.label;
-    sel.appendChild(opt);
-  });
-})();
 
 // Layer groups
 const layers = {
@@ -3643,10 +3639,8 @@ async function abrirModalProspeccao(qid, subId){
   // na primeira abertura quanto quando reabrimos depois de recalcular.
   document.getElementById('presp-pergunta-lotes').style.display = 'block';
   document.getElementById('presp-checklist-lotes').style.display = 'none';
-  document.getElementById('presp-checklist-itens').innerHTML = sub.lotes.map(l =>
-    `<label style="display:flex;align-items:center;gap:4px;background:#fff;border:1px solid #ddd;border-radius:4px;padding:3px 6px;cursor:pointer">
-      <input type="checkbox" checked data-lote="${l}"> ${l}
-    </label>`).join('');
+  _lotesMarcadosParaRetirar = new Set();
+  atualizarResumoSelecaoLotes();
 
   // A imagem do e-mail agora vem exclusivamente da captura de tela do mapa
   // (botão "Capturar imagem do mapa"), então o formulário começa sem imagem.
@@ -3696,7 +3690,125 @@ Ficamos no aguardo de um retorno.`;
 function responderPerguntaLotesProspeccao(enviarTudo){
   document.getElementById('presp-pergunta-lotes').style.display = 'none';
   document.getElementById('presp-checklist-lotes').style.display = enviarTudo ? 'none' : 'block';
+  _lotesMarcadosParaRetirar = new Set();
+  atualizarResumoSelecaoLotes();
 }
+
+// ── Seleção de lotes a retirar clicando direto no mapa ──────────────
+// Substituiu a lista de checkboxes por número (o Matheus não decora os
+// números dos lotes de cabeça, mas reconhece na hora pelo formato/posição
+// no mapa) — reaproveita o mesmo padrão de "sair do modo X e restaurar o
+// mapa" já usado pelo modo de captura de imagem.
+let _lotesMarcadosParaRetirar = new Set();
+let _selecaoLotesEmAndamento = null;
+
+function atualizarResumoSelecaoLotes(){
+  const el = document.getElementById('presp-resumo-selecao');
+  if (!el) return;
+  if (!_lotesMarcadosParaRetirar.size) {
+    el.textContent = 'Nenhum lote marcado pra retirar ainda.';
+  } else {
+    el.textContent = `${_lotesMarcadosParaRetirar.size} lote${_lotesMarcadosParaRetirar.size===1?'':'s'} marcado${_lotesMarcadosParaRetirar.size===1?'':'s'} pra retirar: ${[..._lotesMarcadosParaRetirar].join(', ')}`;
+  }
+}
+
+function iniciarSelecaoLotesNoMapa(){
+  if (!_prospeccaoAtual || _selecaoLotesEmAndamento) return;
+  const {q, sub} = _prospeccaoAtual;
+  const qidBase = q.id.split('-')[0];
+
+  document.getElementById('presp-overlay').classList.remove('on');
+  map.closePopup();
+
+  const nomes = ['lotes','quadras','zona','ou','geoimovel','itbiPontos'];
+  _selecaoLotesEmAndamento = {
+    center: map.getCenter(),
+    zoom: map.getZoom(),
+    ativas: nomes.filter(n => layers[n] && map.hasLayer(layers[n])),
+    tinhaLotes: !!(lotesLayer && map.hasLayer(lotesLayer)),
+    tinhaBusca: !!(typeof searchMarker !== 'undefined' && searchMarker && map.hasLayer(searchMarker)),
+    snapshotAnterior: new Set(_lotesMarcadosParaRetirar), // pra restaurar se cancelar
+    layer: L.layerGroup().addTo(map),
+    polys: {},
+  };
+  _selecaoLotesEmAndamento.ativas.forEach(n => map.removeLayer(layers[n]));
+  if (_selecaoLotesEmAndamento.tinhaLotes) map.removeLayer(lotesLayer);
+  if (_selecaoLotesEmAndamento.tinhaBusca) map.removeLayer(searchMarker);
+
+  const bounds = [];
+  sub.lotes.forEach(l => {
+    const sql = `${qidBase}.${l}`;
+    const ring = LOTES_GEOM[sql];
+    if (!ring || ring.length < 3) return;
+    const latlngs = ring.map(c => [c[1], c[0]]);
+    bounds.push(...latlngs);
+    const marcado = _lotesMarcadosParaRetirar.has(l);
+    const poly = L.polygon(latlngs, {
+      color: marcado ? '#c62828' : '#1565c0',
+      weight: 2,
+      fillColor: marcado ? '#e57373' : '#1565c0',
+      fillOpacity: marcado ? 0.55 : 0.3,
+    }).addTo(_selecaoLotesEmAndamento.layer);
+    const center = poly.getBounds().getCenter();
+    const label = L.divIcon({
+      className: '',
+      html: `<div style="background:rgba(255,255,255,.95);border:1px solid #999;border-radius:3px;
+                         padding:1px 5px;font-size:10px;font-family:monospace;white-space:nowrap;
+                         color:#111;pointer-events:none">${l}</div>`,
+      iconAnchor: [0, 0]
+    });
+    L.marker(center, { icon: label, interactive: false }).addTo(_selecaoLotesEmAndamento.layer);
+    poly.on('click', () => toggleLoteNaSelecaoDoMapa(l, poly));
+    _selecaoLotesEmAndamento.polys[l] = poly;
+  });
+
+  if (bounds.length) map.fitBounds(bounds, {padding:[60,60]});
+  document.getElementById('selecao-lotes-barra').style.display = 'flex';
+  atualizarContadorSelecaoLotes();
+  setTimeout(()=>map.invalidateSize(), 80);
+}
+
+function toggleLoteNaSelecaoDoMapa(l, poly){
+  if (_lotesMarcadosParaRetirar.has(l)) {
+    _lotesMarcadosParaRetirar.delete(l);
+    poly.setStyle({ color: '#1565c0', fillColor: '#1565c0', fillOpacity: 0.3 });
+  } else {
+    _lotesMarcadosParaRetirar.add(l);
+    poly.setStyle({ color: '#c62828', fillColor: '#e57373', fillOpacity: 0.55 });
+  }
+  atualizarContadorSelecaoLotes();
+}
+
+function atualizarContadorSelecaoLotes(){
+  const el = document.getElementById('selecao-lotes-contador');
+  if (el) el.textContent = `${_lotesMarcadosParaRetirar.size} marcado(s)`;
+}
+
+function _sairModoSelecaoLotes(){
+  document.getElementById('selecao-lotes-barra').style.display = 'none';
+  const s = _selecaoLotesEmAndamento;
+  if (!s) return;
+  map.removeLayer(s.layer);
+  s.ativas.forEach(n => { if (layers[n]) layers[n].addTo(map); });
+  if (s.tinhaLotes && lotesLayer) lotesLayer.addTo(map);
+  if (s.tinhaBusca && typeof searchMarker !== 'undefined' && searchMarker) searchMarker.addTo(map);
+  const {center, zoom} = s;
+  _selecaoLotesEmAndamento = null;
+  setTimeout(()=>{ map.invalidateSize(); map.setView(center, zoom); }, 80);
+  document.getElementById('presp-overlay').classList.add('on');
+}
+
+function concluirSelecaoLotesNoMapa(){
+  _sairModoSelecaoLotes();
+  atualizarResumoSelecaoLotes();
+}
+
+function cancelarSelecaoLotesNoMapa(){
+  if (_selecaoLotesEmAndamento) _lotesMarcadosParaRetirar = _selecaoLotesEmAndamento.snapshotAnterior;
+  _sairModoSelecaoLotes();
+  atualizarResumoSelecaoLotes();
+}
+
 // Exclui fisicamente os lotes desmarcados (mesmo mecanismo de
 // retirarLoteDaComposicaoAtiva — reaproveita, já que ainda não existe
 // nenhuma prospecção ativa nesse ponto, então a "migração" simplesmente
@@ -3704,14 +3816,12 @@ function responderPerguntaLotesProspeccao(enviarTudo){
 // modal já com a composição recalculada (pode ter dividido em duas
 // partes, se o lote retirado era do meio).
 async function confirmarExclusaoAntesDeEnviar(){
-  const { q } = _prospeccaoAtual;
+  const { q, sub } = _prospeccaoAtual;
   const qidBase = q.id.split('-')[0];
-  const checkboxes = Array.from(document.querySelectorAll('#presp-checklist-itens input[type=checkbox]'));
-  const lotesParaRetirar = checkboxes.filter(c=>!c.checked).map(c=>c.dataset.lote);
-  const lotesMantidos = checkboxes.filter(c=>c.checked).map(c=>c.dataset.lote);
+  const lotesParaRetirar = [..._lotesMarcadosParaRetirar];
+  const lotesMantidos = sub.lotes.filter(l => !_lotesMarcadosParaRetirar.has(l));
   if (!lotesParaRetirar.length) {
-    mostrarToast('Nenhum lote desmarcado — nada a retirar.');
-    document.getElementById('presp-checklist-lotes').style.display = 'none';
+    mostrarToast('Nenhum lote marcado pra retirar — clique em "🗺️ Escolher lotes no mapa".');
     return;
   }
   if (!lotesMantidos.length) {
@@ -3723,8 +3833,8 @@ async function confirmarExclusaoAntesDeEnviar(){
     await retirarLoteDaComposicaoAtiva(`${qidBase}.${l}`, qidBase, q.bairro);
   }
   const novosSubs = getSubGroups(q).filter(s => s.tipo === 'ativo');
-  const novoSub = novosSubs.find(s => s.lotes.length && s.lotes.every(l => lotesMantidos.includes(l)))
-    || novosSubs.sort((a,b)=>b.n-a.n)[0];
+  const candidatos = novosSubs.filter(s => s.lotes.length && s.lotes.every(l => lotesMantidos.includes(l)));
+  const novoSub = candidatos.sort((a,b)=>b.n-a.n)[0] || novosSubs.sort((a,b)=>b.n-a.n)[0];
   document.getElementById('presp-status').textContent = '';
   if (!novoSub) {
     mostrarToast('Não sobrou nenhuma composição válida depois da exclusão.');
@@ -3732,6 +3842,13 @@ async function confirmarExclusaoAntesDeEnviar(){
     return;
   }
   await abrirModalProspeccao(q.id, novoSub.subId);
+  // Os lotes mantidos podem ter ficado fisicamente separados em mais de uma
+  // peça (ex: retirar um lote do meio divide o resto em dois pedaços) — só
+  // uma delas entra neste envio; avisa com clareza, sem deixar isso
+  // silencioso, senão a outra parte passa despercebida.
+  if (candidatos.length > 1) {
+    mostrarToast(`Atenção: os lotes mantidos ficaram em ${candidatos.length} partes separadas. Preparei o envio da maior (${novoSub.n} lotes) — as outras ${candidatos.length-1} parte(s) continuam na lista normalmente, envie-as à parte se quiser.`);
+  }
   mostrarToast('Composição recalculada — confira os dados atualizados abaixo.');
 }
 function fecharModalProspeccao(){
@@ -4329,15 +4446,21 @@ function showLotesOnMap(groupId, lotesList) {
     const latlngs = ring.map(c => [c[1], c[0]]);
 
     const st = STATUS_LOTE_CACHE[sql];
+    // Usa CORES_RESTRICAO como fonte única de cor por status — antes só
+    // reconhecia 'obras'/'dificil'/'futuro' explicitamente, então lotes com
+    // 'descarte', 'naoedificavel' ou o novo 'retirado_prospeccao' caíam no
+    // azul padrão por engano (parecia que o lote continuava "normal"/em
+    // prospecção mesmo depois de excluído da composição).
     let color = '#1565c0', fillColor = '#1565c0', fillOpacity = 0.3;
-    if (st && st.status==='obras') { color = '#8a8a8a'; fillColor = '#bdbdbd'; fillOpacity = 0.25; }
-    else if (st && (st.status==='dificil' || st.status==='futuro')) { color = '#8d6e63'; fillColor = '#a1887f'; fillOpacity = 0.3; }
+    if (st && st.status && CORES_RESTRICAO[st.status]) {
+      color = CORES_RESTRICAO[st.status]; fillColor = color; fillOpacity = 0.25;
+    }
 
     const poly = L.polygon(latlngs, { color, weight: 1.5, fillColor, fillOpacity });
     poly._yunySql = sql;
     poly._yunyGroupId = groupId;
     const center = poly.getBounds().getCenter();
-    const iconeStatus = {obras:' 🏗', dificil:' ⚠️', futuro:' 🏢'}[st&&st.status] || '';
+    const iconeStatus = {obras:' 🏗', dificil:' ⚠️', futuro:' 🏢', descarte:' 🗂️', naoedificavel:' 🌳', retirado_prospeccao:' ↩️'}[st&&st.status] || '';
     const label = L.divIcon({
       className: '',
       html: `<div style="background:rgba(255,255,255,.9);border:1px solid #999;border-radius:3px;
@@ -6218,6 +6341,16 @@ iniciarAutenticacao();
 </div>
 <div id="captura-selecao"><div id="captura-sel-rect"><div id="captura-medidas"></div></div></div>
 
+<!-- ── MODO SELEÇÃO DE LOTES NO MAPA (retirar antes de enviar) ────── -->
+<div id="selecao-lotes-barra" style="display:none;position:fixed;top:0;left:0;right:0;z-index:10001;background:#1a2e1a;color:#fff;padding:10px 16px;display:flex;align-items:center;gap:12px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.3)">
+  <span style="font-weight:700;color:#fff">YUNY</span>
+  <span>Clique nos lotes que você quer <strong>retirar</strong> da composição.</span>
+  <span id="selecao-lotes-contador" style="background:#c62828;padding:2px 10px;border-radius:12px;font-weight:600">0 marcado(s)</span>
+  <span style="flex:1"></span>
+  <button onclick="concluirSelecaoLotesNoMapa()" style="background:#2e7d32;color:#fff;border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-weight:600">✓ Concluir seleção</button>
+  <button onclick="cancelarSelecaoLotesNoMapa()" style="background:transparent;color:#fff;border:1px solid #fff;padding:6px 14px;border-radius:5px;cursor:pointer">✕ Cancelar</button>
+</div>
+
 <div class="presp-overlay" id="presp-overlay">
   <div class="presp-modal">
     <h3>📧 Enviar Prospecção</h3>
@@ -6230,8 +6363,9 @@ iniciarAutenticacao();
       </div>
     </div>
     <div id="presp-checklist-lotes" style="display:none;margin:0 0 12px;padding:10px;background:#fdf6e3;border:1px solid #e8d9a0;border-radius:6px;font-size:12px">
-      <div style="margin-bottom:6px;color:#7a6323">Desmarque os lotes que você quer <strong>retirar</strong> desta composição antes de enviar — a composição será recalculada (pode até dividir em duas partes, se o lote retirado for do meio):</div>
-      <div id="presp-checklist-itens" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+      <div style="margin-bottom:8px;color:#7a6323">Clique no mapa em cada lote que você quer <strong>retirar</strong> desta composição — a composição será recalculada (pode até dividir em duas partes, se o lote retirado for do meio):</div>
+      <div id="presp-resumo-selecao" style="margin-bottom:8px;font-size:12px;color:#555">Nenhum lote marcado pra retirar ainda.</div>
+      <button type="button" class="presp-btn-cancel" style="width:100%;margin-bottom:6px" onclick="iniciarSelecaoLotesNoMapa()">🗺️ Escolher lotes no mapa</button>
       <button type="button" class="presp-btn-send" style="width:100%" onclick="confirmarExclusaoAntesDeEnviar()">Recalcular composição e continuar</button>
     </div>
     <div class="presp-img-vazia" id="presp-img-vazia" tabindex="0" onpaste="colarImagemProspeccao(event)">
