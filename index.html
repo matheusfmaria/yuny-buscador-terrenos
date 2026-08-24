@@ -782,6 +782,22 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
   </div>
 </div>
 
+<div class="retirar-overlay" id="obs-restricao-overlay">
+  <div class="retirar-modal">
+    <h3 id="obs-restricao-titulo" style="color:#555">Observação da restrição</h3>
+    <p style="font-size:12px;color:#666;margin-bottom:10px">
+      Descreva o motivo dessa restrição (ex: obra em andamento, proprietário não localizado etc.) —
+      vale pra todos os lotes da composição de uma vez, sem precisar preencher lote a lote depois.
+      Fica registrado no histórico e na observação de cada lote.
+    </p>
+    <textarea id="obs-restricao-texto" placeholder="Observação (obrigatória)..."></textarea>
+    <div class="presp-actions">
+      <button class="presp-btn-cancel" onclick="fecharObsRestricaoComposicao()">Cancelar</button>
+      <button class="presp-btn-send" id="obs-restricao-confirmar" onclick="confirmarObsRestricaoComposicao()">Aplicar restrição</button>
+    </div>
+  </div>
+</div>
+
 <div class="retirar-overlay" id="retirar-overlay">
   <div class="retirar-modal">
     <h3>↩️ Retirar do status de prospecção</h3>
@@ -2384,24 +2400,41 @@ function getSubGroups(q) {
     }).sort((a,b)=>b.area-a.area);
   }
 
-  // Lotes restritos viram um subgrupo POR TIPO de restrição — antes eram
-  // todos lumpados numa única "composição restrita", o que pintava a área
-  // inteira com uma cor só mesmo quando havia, por exemplo, obras E difícil
-  // misturados na mesma quadra (bug relatado pelo Matheus na 036.129-b).
+  // Lotes restritos viram um subgrupo POR TIPO de restrição E por
+  // adjacência física — dois lotes só ficam no mesmo subgrupo restrito se
+  // tiverem o MESMO status E se tocarem fisicamente. Sem a checagem de
+  // adjacência, um lote isolado do outro lado da quadra (ex: 0042) virava
+  // uma "composição" só com um lote do outro canto que por acaso tinha o
+  // mesmo status (ex: retirado_prospeccao), quando deveriam ser duas
+  // composições restritas separadas.
   let subsRestritos = [];
   if (restritos.length > 0) {
-    const porStatus = {};
-    restritos.forEach(l => {
-      const status = (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status || 'restrito';
-      (porStatus[status] = porStatus[status] || []).push(l);
+    const edgesR = GRUPOS_EDGES[q.bairro+'::'+q.id] || [];
+    const restritosSet = new Set(restritos);
+    const statusPorLoteR = {};
+    restritos.forEach(l => { statusPorLoteR[l] = (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status || 'restrito'; });
+    const adjR = {};
+    restritos.forEach(l => { adjR[l] = new Set(); });
+    edgesR.forEach(([a,b]) => {
+      if (!restritosSet.has(a) || !restritosSet.has(b)) return;
+      if (statusPorLoteR[a] !== statusPorLoteR[b]) return; // só conecta lotes com a MESMA restrição
+      adjR[a].add(b); adjR[b].add(a);
     });
-    subsRestritos = Object.entries(porStatus).map(([status, lotesGrupo]) => {
+    const visitadoR = new Set();
+    restritos.forEach(start => {
+      if (visitadoR.has(start)) return;
+      const comp = []; const fila=[start]; visitadoR.add(start);
+      while (fila.length) {
+        const cur = fila.pop();
+        comp.push(cur);
+        (adjR[cur]||new Set()).forEach(viz => { if(!visitadoR.has(viz)){ visitadoR.add(viz); fila.push(viz); } });
+      }
       let area = 0;
-      lotesGrupo.forEach(l => { area += LOTES_AREA[`${qidBase}.${l}`] || 0; });
-      return {
-        parentId: q.id, lotes: lotesGrupo, area: Math.round(area), n: lotesGrupo.length,
-        score: null, vgv: null, tipo: 'restrito', statusRestricao: status,
-      };
+      comp.forEach(l => { area += LOTES_AREA[`${qidBase}.${l}`] || 0; });
+      subsRestritos.push({
+        parentId: q.id, lotes: comp, area: Math.round(area), n: comp.length,
+        score: null, vgv: null, tipo: 'restrito', statusRestricao: statusPorLoteR[start],
+      });
     });
   }
 
@@ -3388,13 +3421,13 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal, bairro){
       <div style="font-size:10.5px;color:#888;margin-bottom:4px">Aplicar a TODOS os ${lotes.length} lotes da composição${misto?' <span style="color:#c9a227">(hoje misto entre os lotes)</span>':''}:</div>
       <div style="display:flex;gap:5px;flex-wrap:wrap">
         <button style="flex:1;min-width:80px;font-size:10.5px;padding:4px 6px;border-radius:5px;border:1px solid #ddd;cursor:pointer;background:${todosIguais('obras')?'#8a8a8a':'#fff'};color:${todosIguais('obras')?'#fff':'#555'}"
-          onclick="marcarStatusComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],${todosIguais('obras')?'null':"'obras'"},'${qidBase}')">🏗 Obras</button>
+          onclick="${todosIguais('obras')?`marcarStatusComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],null,'${qidBase}')`:`abrirObsRestricaoComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],'obras','${qidBase}')`}">🏗 Obras</button>
         <button style="flex:1;min-width:80px;font-size:10.5px;padding:4px 6px;border-radius:5px;border:1px solid #ddd;cursor:pointer;background:${todosIguais('dificil')?'#8d6e63':'#fff'};color:${todosIguais('dificil')?'#fff':'#555'}"
-          onclick="marcarStatusComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],${todosIguais('dificil')?'null':"'dificil'"},'${qidBase}')">⚠️ Difícil</button>
+          onclick="${todosIguais('dificil')?`marcarStatusComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],null,'${qidBase}')`:`abrirObsRestricaoComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],'dificil','${qidBase}')`}">⚠️ Difícil</button>
         <button style="flex:1;min-width:80px;font-size:10.5px;padding:4px 6px;border-radius:5px;border:1px solid #ddd;cursor:pointer;background:${todosIguais('futuro')?'#8d6e63':'#fff'};color:${todosIguais('futuro')?'#fff':'#555'}"
-          onclick="marcarStatusComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],${todosIguais('futuro')?'null':"'futuro'"},'${qidBase}')">🏢 Futuro lanç.</button>
+          onclick="${todosIguais('futuro')?`marcarStatusComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],null,'${qidBase}')`:`abrirObsRestricaoComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],'futuro','${qidBase}')`}">🏢 Futuro lanç.</button>
         <button style="flex:1;min-width:80px;font-size:10.5px;padding:4px 6px;border-radius:5px;border:1px solid #ddd;cursor:pointer;background:${todosIguais('naoedificavel')?'#8a8a8a':'#fff'};color:${todosIguais('naoedificavel')?'#fff':'#555'}"
-          onclick="marcarStatusComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],${todosIguais('naoedificavel')?'null':"'naoedificavel'"},'${qidBase}')">🌳 Não edif.</button>
+          onclick="${todosIguais('naoedificavel')?`marcarStatusComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],null,'${qidBase}')`:`abrirObsRestricaoComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],'naoedificavel','${qidBase}')`}">🌳 Não edif.</button>
         ${statusPorLote.some(s=>s) ? `<button style="flex:1;min-width:80px;font-size:10.5px;padding:4px 6px;border-radius:5px;border:1px solid #ddd;cursor:pointer;background:#fff;color:#c62828"
           onclick="marcarStatusComposicao('${qidBase}',[${lotes.map(l=>`'${l}'`).join(',')}],null,'${qidBase}')">✕ Limpar todos</button>` : ''}
       </div>
@@ -3528,14 +3561,36 @@ async function saveLoteStatus(sql, status, obs) {
 // de uma composição de uma vez, em vez de precisar marcar lote a lote.
 // Mesmo padrão do descarte temporário por composição, só que pros status
 // que não têm motivo/prazo — aqui é só "aplicar a todos" ou "limpar todos".
-async function marcarStatusComposicao(qidBase, lotes, status, groupId){
+const ICONE_RESTRICAO = {obras:'🏗', dificil:'⚠️', futuro:'🏢', descarte:'🗂️', naoedificavel:'🌳', retirado_prospeccao:'↩️'};
+let _obsRestricaoAtual = null;
+function abrirObsRestricaoComposicao(qidBase, lotes, status, groupId){
+  _obsRestricaoAtual = {qidBase, lotes, status, groupId};
+  document.getElementById('obs-restricao-titulo').textContent = `${ICONE_RESTRICAO[status]||''} Restrição: ${LABEL_RESTRICAO[status]||status}`;
+  document.getElementById('obs-restricao-texto').value = '';
+  document.getElementById('obs-restricao-overlay').classList.add('on');
+}
+function fecharObsRestricaoComposicao(){
+  document.getElementById('obs-restricao-overlay').classList.remove('on');
+  _obsRestricaoAtual = null;
+}
+async function confirmarObsRestricaoComposicao(){
+  const obs = document.getElementById('obs-restricao-texto').value.trim();
+  if (!obs) { mostrarToast('Descreva a observação — é obrigatória pra aplicar a restrição.'); return; }
+  const {qidBase, lotes, status, groupId} = _obsRestricaoAtual;
+  document.getElementById('obs-restricao-overlay').classList.remove('on');
+  await marcarStatusComposicao(qidBase, lotes, status, groupId, obs);
+  await adicionarHistoricoComposicao(groupId,
+    `Restrição "${LABEL_RESTRICAO[status]||status}" aplicada a todos os ${lotes.length} lotes da composição — observação: ${obs}`, null);
+  _obsRestricaoAtual = null;
+}
+async function marcarStatusComposicao(qidBase, lotes, status, groupId, obsNova, _pulandoPropagacao){
   const sqls = lotes.map(l => `${qidBase}.${l}`);
   const statusAnteriores = {};
   sqls.forEach(sql => { statusAnteriores[sql] = (STATUS_LOTE_CACHE[sql]||{}).status; });
 
   sqls.forEach(sql => {
-    const obsAtual = (STATUS_LOTE_CACHE[sql]||{}).obs || '';
-    STATUS_LOTE_CACHE[sql] = { id: sql, status, obs: obsAtual };
+    const obs = obsNova!=null ? obsNova : ((STATUS_LOTE_CACHE[sql]||{}).obs || '');
+    STATUS_LOTE_CACHE[sql] = { id: sql, status, obs };
   });
   renderQuadraMarkers();
   renderQuadraList();
@@ -3559,6 +3614,23 @@ async function marcarStatusComposicao(qidBase, lotes, status, groupId){
   if (status) {
     await migrarProspeccaoAposExclusao(qidBase, selectedBairro, lotes,
       `Restrição "${LABEL_RESTRICAO[status]||status}" aplicada em massa — área da composição recalculada.`);
+  }
+
+  // Composições vinculadas sempre compartilham o mesmo status — o último
+  // aplicado (inclusive remover, status=null) vale pra todas as vinculadas.
+  if (!_pulandoPropagacao) {
+    const grupo = grupoVinculoDoSubId(groupId);
+    if (grupo) {
+      for (const membro of grupo.membros) {
+        if (membro.subId === groupId) continue;
+        const qMembro = QUADRAS.find(x => x.id === membro.subId.split('~')[0] && x.bairro === membro.bairro);
+        if (!qMembro) continue;
+        const subMembro = getSubGroups(qMembro).find(s => s.subId === membro.subId);
+        if (!subMembro) continue;
+        await marcarStatusComposicao(membro.subId.split('-')[0], subMembro.lotes, status, membro.subId, obsNova, true);
+      }
+      mostrarToast(`Status também aplicado à${grupo.membros.length-1===1?'':'s'} ${grupo.membros.length-1} composiç${grupo.membros.length-1===1?'ão':'ões'} vinculada${grupo.membros.length-1===1?'':'s'}.`);
+    }
   }
 }
 
@@ -4678,6 +4750,36 @@ function statsVinculo(grupoId){
   }).filter(Boolean);
   return {grupoId, area: Math.round(area), n, detalhes};
 }
+// Valores pra exibição no TOPO da ficha (score-box e "Estimativa de VGV")
+// quando a composição aberta está vinculada a outra(s): soma área/lotes,
+// usa o MENOR score e o MENOR preço de mercado (R$/m²) entre as
+// vinculadas — nunca o maior nem a média, por pedido explícito do
+// Matheus (mais conservador). Só entra em ação com 2+ membros resolvidos;
+// se algum membro não for encontrado (bairro/distrito não carregado
+// ainda, por ex.), simplesmente não combina e a ficha mostra só os dados
+// desta composição, como sempre foi.
+function statsCombinadoParaFicha(subIdAtual, qAtual, isCompacto){
+  const grupo = grupoVinculoDoSubId(subIdAtual);
+  if (!grupo) return null;
+  const membros = grupo.membros.map(m => {
+    const qm = QUADRAS.find(x => x.id === m.subId.split('~')[0] && x.bairro === m.bairro);
+    if (!qm) return null;
+    const subM = getSubGroups(qm).find(s => s.subId === m.subId);
+    if (!subM || subM.tipo !== 'ativo') return null;
+    const preco = isCompacto ? (qm.precoLocalCompacto||VGV_PRECO[qm.bairro]||14000) : (qm.precoLocal||VGV_PRECO[qm.bairro]||14000);
+    return {sub: subM, q: qm, preco};
+  }).filter(Boolean);
+  if (membros.length < 2) return null;
+
+  const area = Math.round(membros.reduce((s,m)=>s+m.sub.area, 0));
+  const n = membros.reduce((s,m)=>s+m.sub.n, 0);
+  const score = Math.min(...membros.map(m=>m.sub.score));
+  const preco = Math.min(...membros.map(m=>m.preco));
+  const membroDoPrecoMin = membros.find(m=>m.preco===preco);
+  const qParaVgv = {...qAtual, precoLocal: preco, precoLocalCompacto: preco, ou: membroDoPrecoMin.q.ou};
+  const vgv = calcVGVForArea(qParaVgv, area);
+  return {area, n, score, vgv, preco, fontePreco: membroDoPrecoMin.q.precoFonte, membros: membros.length};
+}
 async function salvarVinculo(grupoId, membros){
   VINCULOS_CACHE[grupoId] = {membros, criadoEm: new Date().toISOString()};
   if (_fbAtivo) { try { await _fbDb.ref('vinculos_composicao/'+grupoId).set(VINCULOS_CACHE[grupoId]); } catch(e){ console.warn(e); } }
@@ -5597,6 +5699,11 @@ function selectQuadra(qid, subId, manterView, bairroHint){
   const dispPrecoQ = isCompactoQ ? (q.precoLocalCompacto||VGV_PRECO[q.bairro]||14000) : (q.precoLocal||VGV_PRECO[q.bairro]||14000);
   const dispPctQ = isCompactoQ ? q.pctVendidoCompacto : q.pctVendido;
   const dispFonteQ = isCompactoQ ? q.precoFonteCompacto : q.precoFonte;
+  // Composições vinculadas (ver iniciarModoVinculo): a ficha passa a
+  // mostrar área/lotes somados e, por conservadorismo, o MENOR score e o
+  // MENOR preço de mercado (R$/m²) entre as composições vinculadas — não
+  // a média nem o maior. VGV recalculado com esses valores combinados.
+  const _combo = statsCombinadoParaFicha(_stats.subId, q, isCompactoQ);
   Object.values(quadraPolygons).forEach(layer=>{
     // usa os dados gravados no próprio layer (subId + bairro), não a chave
     // do dicionário, que agora é composta só pra evitar sobrescrita
@@ -5709,10 +5816,11 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       </div>`;
     })()}
     <div class="score-box">
-      <div class="score-lbl">Potencial de composição${_stats.dividido?' (pedaço separado por restrição ou zoneamento)':''}</div>
-      <div class="score-num" style="color:#7b1fa2">${_stats.area.toLocaleString('pt-BR')}<span style="font-size:13px;color:#aaa"> m²</span></div>
-      <div style="font-size:12px;color:#555;margin-top:4px">${_stats.n} lotes${_stats.dividido?` (de ${q.n} originais)`:''} · score ${_stats.score} <span style="font-size:11px;color:#aaa">(negociação: ${negSc(_stats.n)}/20 pts)</span></div>
-      <div class="score-track"><div class="score-fill" style="width:${Math.min(100,_stats.area/500)}%;background:#7b1fa2"></div></div>
+      <div class="score-lbl">Potencial de composição${_stats.dividido?' (pedaço separado por restrição ou zoneamento)':''}${_combo?' · combinado com vínculo':''}</div>
+      <div class="score-num" style="color:#7b1fa2">${(_combo?_combo.area:_stats.area).toLocaleString('pt-BR')}<span style="font-size:13px;color:#aaa"> m²</span></div>
+      <div style="font-size:12px;color:#555;margin-top:4px">${(_combo?_combo.n:_stats.n)} lotes${_stats.dividido?` (de ${q.n} originais)`:''} · score ${_combo?_combo.score:_stats.score}${_combo?' <span style="font-size:10px;color:#aaa">(menor entre as vinculadas)</span>':''} <span style="font-size:11px;color:#aaa">(negociação: ${negSc(_stats.n)}/20 pts)</span></div>
+      <div class="score-track"><div class="score-fill" style="width:${Math.min(100,(_combo?_combo.area:_stats.area)/500)}%;background:#7b1fa2"></div></div>
+      ${_combo?`<div style="font-size:10px;color:#888;margin-top:4px">Somado com ${_combo.membros-1} composiç${_combo.membros-1===1?'ão':'ões'} vinculada${_combo.membros-1===1?'':'s'} — score e preço de mercado usam o valor mais conservador (menor) entre elas.</div>`:''}
     </div>
     ${htmlSecaoHistorico(_stats.subId, _stats.lotes, q.id.split('-')[0], q.id, q.bairro)}
     <div class="dp-sec">
@@ -5859,8 +5967,12 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     </div>`;
     })()}
     <div class="dp-sec">
-      <div class="dp-st">Estimativa de VGV${_stats.dividido?' (desta parte)':''}</div>
-      <div style="font-size:22px;font-weight:600;color:#1a2e1a;margin-bottom:6px">R$ ${(_stats.vgv/1e6).toLocaleString('pt-BR',{minimumFractionDigits:0,maximumFractionDigits:0})} M</div>
+      <div class="dp-st">Estimativa de VGV${_stats.dividido?' (desta parte)':''}${_combo?' · combinado com vínculo':''}</div>
+      <div style="font-size:22px;font-weight:600;color:#1a2e1a;margin-bottom:6px">R$ ${((_combo?_combo.vgv:_stats.vgv)/1e6).toLocaleString('pt-BR',{minimumFractionDigits:0,maximumFractionDigits:0})} M</div>
+      ${_combo?`<div style="font-size:10.5px;color:#6d4c00;background:#fff8e1;border:1px solid #f9a825;border-radius:5px;padding:6px 8px;margin-bottom:7px;line-height:1.45">
+        🔗 <strong>Combinado com composição vinculada.</strong> Área e lotes somados; score e preço de mercado usam o
+        menor valor entre as composições vinculadas, por conservadorismo.
+      </div>`:''}
       ${q.ou ? `<div style="font-size:10.5px;color:#8a6d1a;background:#fff8e1;border:1px solid #ffe082;border-radius:5px;padding:6px 8px;margin-bottom:7px;line-height:1.45">
         ⚠️ <strong>Conta simplificada — área em Operação Urbana.</strong>
         Dentro do perímetro o zoneamento comum não se aplica, e cada OU tem setores
@@ -5869,8 +5981,8 @@ function selectQuadra(qid, subId, manterView, bairroHint){
         operação urbana</strong> antes de usar este número.
       </div>` : ''}
       <div class="dp-r"><span class="dp-rl">CA efetivo ${q.ou?'<span style="font-size:9px;color:#8a6d1a;font-weight:600">(OU — simplificado)</span>':'(c/ cota solidar.)'}</span><span class="dp-rv">${caEfetivo(qz.zona, q.ou).toFixed(2)}x</span></div>
-      <div class="dp-r"><span class="dp-rl">Área construível est.</span><span class="dp-rv">${Math.round(_stats.area*caEfetivo(qz.zona, q.ou)).toLocaleString('pt-BR')} m²</span></div>
-      <div class="dp-r"><span class="dp-rl">Preço médio m² ${dispFonteQ==='hiperlocal'?'<span style="font-size:9px;color:#2e7d32;font-weight:600">(hiperlocal)</span>':'<span style="font-size:9px;color:#aaa">(méd. bairro)</span>'}</span><span class="dp-rv">R$ ${dispPrecoQ.toLocaleString('pt-BR')}/m²</span></div>
+      <div class="dp-r"><span class="dp-rl">Área construível est.</span><span class="dp-rv">${Math.round((_combo?_combo.area:_stats.area)*caEfetivo(qz.zona, q.ou)).toLocaleString('pt-BR')} m²</span></div>
+      <div class="dp-r"><span class="dp-rl">Preço médio m² ${_combo?'<span style="font-size:9px;color:#6d4c00;font-weight:600">(menor entre vinculadas)</span>':(dispFonteQ==='hiperlocal'?'<span style="font-size:9px;color:#2e7d32;font-weight:600">(hiperlocal)</span>':'<span style="font-size:9px;color:#aaa">(méd. bairro)</span>')}</span><span class="dp-rv">R$ ${(_combo?_combo.preco:dispPrecoQ).toLocaleString('pt-BR')}/m²</span></div>
       <div class="dp-r"><span class="dp-rl">% vendido (5 lanç. próximos)</span><span class="dp-rv">${(dispPctQ||0).toFixed(0)}%</span></div>
       <button class="dash-row-btn" style="width:100%;margin-top:7px" onclick="abrirBenchmarkLancamentos('${q.id}')">Ver benchmark →</button>
       <div style="font-size:10px;color:#aaa;margin-top:4px">* ${q.ou?'CA 4,8 simplificado (OU)':'CA LPUOS + 20% cota solidariedade (art. 112)'} + varanda não computável · Preços de lançamentos: FipeZap abr/2025, apto.vc, Brain Intelligence · Não substitui estudo de viabilidade.</div>
@@ -6535,7 +6647,7 @@ iniciarAutenticacao();
 <div id="captura-selecao"><div id="captura-sel-rect"><div id="captura-medidas"></div></div></div>
 
 <!-- ── MODO SELEÇÃO DE LOTES NO MAPA (retirar antes de enviar) ────── -->
-<div id="selecao-lotes-barra" style="display:none;position:fixed;top:0;left:0;right:0;z-index:10001;background:#1a2e1a;color:#fff;padding:10px 16px;display:flex;align-items:center;gap:12px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.3)">
+<div id="selecao-lotes-barra" style="display:none;position:fixed;top:0;left:0;right:0;z-index:10001;background:#1a2e1a;color:#fff;padding:10px 16px;align-items:center;gap:12px;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.3)">
   <span style="font-weight:700;color:#fff">YUNY</span>
   <span>Clique nos lotes que você quer <strong>retirar</strong> da composição.</span>
   <span id="selecao-lotes-contador" style="background:#c62828;padding:2px 10px;border-radius:12px;font-weight:600">0 marcado(s)</span>
