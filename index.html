@@ -2345,88 +2345,94 @@ function getEffectiveStats(q) {
 // componentes conectados só entre os lotes NÃO restritos. Os lotes restritos
 // viram uma composição própria (cinza, sem score) — visível e clicável, só que
 // separada, ao invés de simplesmente desaparecer.
+// Agrupa um conjunto de lotes em componentes conectados, só ligando dois
+// lotes se (a) existir uma aresta de adjacência real entre eles E (b)
+// tiverem a mesma zona — usado tanto pros lotes efetivos (compõem a
+// composição "normal") quanto pros retirados de outra composição (que
+// também merecem ser tratados como composição ativa de verdade, só que
+// fisicamente separada — ver comentário mais abaixo).
+function _agruparPorAdjacenciaEZona(lotesAlvo, edges, qidBase, q){
+  const alvoSet = new Set(lotesAlvo);
+  const zonaPorLote = {};
+  lotesAlvo.forEach(l => { zonaPorLote[l] = zonaDoLote(qidBase, l, q); });
+  const adj = {};
+  lotesAlvo.forEach(l => { adj[l] = new Set(); });
+  edges.forEach(([a,b]) => {
+    if (!alvoSet.has(a) || !alvoSet.has(b)) return;
+    if (zonaPorLote[a] !== zonaPorLote[b]) return;
+    adj[a].add(b); adj[b].add(a);
+  });
+  const visitado = new Set();
+  const componentes = [];
+  lotesAlvo.forEach(start => {
+    if (visitado.has(start)) return;
+    const comp = []; const fila=[start]; visitado.add(start);
+    while (fila.length) {
+      const cur = fila.pop();
+      comp.push(cur);
+      (adj[cur]||new Set()).forEach(viz => { if(!visitado.has(viz)){ visitado.add(viz); fila.push(viz); } });
+    }
+    componentes.push({lotes: comp, zona: zonaPorLote[start]});
+  });
+  return componentes;
+}
+function _montarSubAtivo(q, qidBase, lotes, zona){
+  let area = 0;
+  lotes.forEach(l => { area += LOTES_AREA[`${qidBase}.${l}`] || 0; });
+  area = Math.round(area);
+  const qz = zona === q.zona ? q : { ...q, zona };
+  return {
+    parentId: q.id, lotes, area, n: lotes.length, zona,
+    score: getScoreForStats(qz, area, lotes.length, lotes),
+    vgv: calcVGVForArea(qz, area),
+    tipo: 'ativo',
+  };
+}
 function getSubGroups(q) {
   const qidBase = q.id.split('-')[0];
   const efetivos = getEffectiveLotes(q);
-  const restritos = q.lotes.filter(l => !efetivos.includes(l));
+  const edges = GRUPOS_EDGES[q.bairro+'::'+q.id] || [];
 
-  let subsAtivos = [];
-  if (efetivos.length > 0) {
-    const edges = GRUPOS_EDGES[q.bairro+'::'+q.id] || [];
-    const efetivosSet = new Set(efetivos);
-    // Zona de cada lote efetivo — usada tanto pra decidir adjacência
-    // quanto pra atribuir a zona (única) de cada subgrupo resultante.
-    const zonaPorLote = {};
-    efetivos.forEach(l => { zonaPorLote[l] = zonaDoLote(qidBase, l, q); });
-    const adj = {};
-    efetivos.forEach(l => { adj[l] = new Set(); });
-    edges.forEach(([a,b]) => {
-      if (!efetivosSet.has(a) || !efetivosSet.has(b)) return;
-      // Não conecta lotes de zonas diferentes — uma composição nunca deve
-      // misturar lotes com zoneamentos diferentes (ex: uma faixa de
-      // ZCOR-1 cortando uma quadra de ZEU ao meio vira duas composições).
-      if (zonaPorLote[a] !== zonaPorLote[b]) return;
-      adj[a].add(b); adj[b].add(a);
-    });
+  let subsAtivos = _agruparPorAdjacenciaEZona(efetivos, edges, qidBase, q)
+    .map(c => _montarSubAtivo(q, qidBase, c.lotes, c.zona));
 
-    const visitado = new Set();
-    const componentes = [];
-    efetivos.forEach(start => {
-      if (visitado.has(start)) return;
-      const comp = []; const fila=[start]; visitado.add(start);
-      while (fila.length) {
-        const cur = fila.pop();
-        comp.push(cur);
-        (adj[cur]||new Set()).forEach(viz => { if(!visitado.has(viz)){ visitado.add(viz); fila.push(viz); } });
-      }
-      componentes.push(comp);
-    });
+  // "Retirado de outra composição" (retirarLoteDaComposicaoAtiva) NÃO é
+  // uma restrição de verdade — o lote continua livre pra prospecção, só
+  // não faz mais parte da composição original. Por isso tratamos como
+  // composição ATIVA comum (mesmo cálculo de adjacência/zona/score/VGV
+  // dos lotes efetivos, sem nenhum selo ou aviso de "retirado" na UI) —
+  // só precisa ficar fisicamente separada, o que já é garantido por não
+  // entrar no cálculo de "efetivos" acima.
+  const todosNaoEfetivos = q.lotes.filter(l => !efetivos.includes(l));
+  const statusPorLoteNE = {};
+  todosNaoEfetivos.forEach(l => { statusPorLoteNE[l] = (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status || 'restrito'; });
+  const retiradosProspeccao = todosNaoEfetivos.filter(l => statusPorLoteNE[l] === 'retirado_prospeccao');
+  const restritosDeVerdade = todosNaoEfetivos.filter(l => statusPorLoteNE[l] !== 'retirado_prospeccao');
 
-    subsAtivos = componentes.map(lotes => {
-      let area = 0;
-      lotes.forEach(l => { area += LOTES_AREA[`${qidBase}.${l}`] || 0; });
-      area = Math.round(area);
-      // Homogêneo por construção (adjacência só liga lotes da mesma
-      // zona), então a zona do primeiro lote representa o subgrupo inteiro.
-      const zona = zonaPorLote[lotes[0]];
-      const qz = zona === q.zona ? q : { ...q, zona };
-      return {
-        parentId: q.id, lotes, area, n: lotes.length,
-        zona,
-        score: getScoreForStats(qz, area, lotes.length, lotes),
-        vgv: calcVGVForArea(qz, area),
-        tipo: 'ativo',
-      };
-    }).sort((a,b)=>b.area-a.area);
+  if (retiradosProspeccao.length > 0) {
+    subsAtivos = subsAtivos.concat(
+      _agruparPorAdjacenciaEZona(retiradosProspeccao, edges, qidBase, q)
+        .map(c => _montarSubAtivo(q, qidBase, c.lotes, c.zona))
+    );
   }
+  subsAtivos.sort((a,b)=>b.area-a.area);
 
-  // Lotes restritos viram um subgrupo POR TIPO de restrição E por
-  // adjacência física — dois lotes só ficam no mesmo subgrupo restrito se
-  // tiverem o MESMO status E se tocarem fisicamente. Sem a checagem de
-  // adjacência, um lote isolado do outro lado da quadra (ex: 0042) virava
-  // uma "composição" só com um lote do outro canto que por acaso tinha o
-  // mesmo status (ex: retirado_prospeccao), quando deveriam ser duas
-  // composições restritas separadas.
+  // Lotes com restrição de verdade (obras/difícil/futuro/descarte/não
+  // edificável) viram um subgrupo POR TIPO de restrição E por adjacência
+  // física — dois lotes só ficam no mesmo subgrupo restrito se tiverem o
+  // MESMO status E se tocarem fisicamente.
   let subsRestritos = [];
-  if (restritos.length > 0) {
-    const edgesR = GRUPOS_EDGES[q.bairro+'::'+q.id] || [];
-    const restritosSet = new Set(restritos);
-    const statusPorLoteR = {};
-    restritos.forEach(l => { statusPorLoteR[l] = (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status || 'restrito'; });
-    // Zona de cada lote restrito — só precisa pra calcular score/VGV dos
-    // que são 'retirado_prospeccao' (ver abaixo); as demais restrições
-    // continuam sem score, então não precisam disso.
-    const zonaPorLoteR = {};
-    restritos.forEach(l => { zonaPorLoteR[l] = zonaDoLote(qidBase, l, q); });
+  if (restritosDeVerdade.length > 0) {
+    const restritosSet = new Set(restritosDeVerdade);
     const adjR = {};
-    restritos.forEach(l => { adjR[l] = new Set(); });
-    edgesR.forEach(([a,b]) => {
+    restritosDeVerdade.forEach(l => { adjR[l] = new Set(); });
+    edges.forEach(([a,b]) => {
       if (!restritosSet.has(a) || !restritosSet.has(b)) return;
-      if (statusPorLoteR[a] !== statusPorLoteR[b]) return; // só conecta lotes com a MESMA restrição
+      if (statusPorLoteNE[a] !== statusPorLoteNE[b]) return; // só conecta lotes com a MESMA restrição
       adjR[a].add(b); adjR[b].add(a);
     });
     const visitadoR = new Set();
-    restritos.forEach(start => {
+    restritosDeVerdade.forEach(start => {
       if (visitadoR.has(start)) return;
       const comp = []; const fila=[start]; visitadoR.add(start);
       while (fila.length) {
@@ -2436,21 +2442,9 @@ function getSubGroups(q) {
       }
       let area = 0;
       comp.forEach(l => { area += LOTES_AREA[`${qidBase}.${l}`] || 0; });
-      area = Math.round(area);
-      const status = statusPorLoteR[start];
-      // "Retirado da composição" não é uma restrição de verdade (obra,
-      // difícil, etc.) — o lote continua disponível pra prospecção, só não
-      // faz mais parte DESTA composição específica. Por isso tem score e
-      // VGV normais, como qualquer composição ativa, em vez de null.
-      const ehRetirado = status === 'retirado_prospeccao';
-      const zonaR = zonaPorLoteR[start];
-      const qzR = zonaR === q.zona ? q : { ...q, zona: zonaR };
       subsRestritos.push({
-        parentId: q.id, lotes: comp, area, n: comp.length,
-        zona: ehRetirado ? zonaR : undefined,
-        score: ehRetirado ? getScoreForStats(qzR, area, comp.length, comp) : null,
-        vgv: ehRetirado ? calcVGVForArea(qzR, area) : null,
-        tipo: 'restrito', statusRestricao: status,
+        parentId: q.id, lotes: comp, area: Math.round(area), n: comp.length,
+        score: null, vgv: null, tipo: 'restrito', statusRestricao: statusPorLoteNE[start],
       });
     });
   }
@@ -2854,8 +2848,27 @@ function subAtualDoMembroVinculo(membro){
   const qMembro = QUADRAS.find(x => x.id === membro.subId.split('~')[0] && x.bairro === membro.bairro);
   if (!qMembro) return null;
   const subs = getSubGroups(qMembro);
+  // 1) subId exato ainda existe — nada mudou, caso mais comum
   const exato = subs.find(s => s.subId === membro.subId);
   if (exato) return exato;
+  // 2) Se guardamos a lista de lotes originais no momento do vínculo,
+  // acha a peça ATIVA atual que mais se sobrepõe a ela. Necessário
+  // porque uma quadra fiscal pode ter VÁRIOS pedaços desconectados ao
+  // mesmo tempo (ex: 016.079~2 e 016.079~7 — mesma quadra, pedaços
+  // diferentes) — só olhar "a maior peça ativa dessa quadra" (like antes)
+  // colapsava os dois num só por engano.
+  if (membro.lotes && membro.lotes.length) {
+    const lotesOriginais = new Set(membro.lotes);
+    let melhor = null, melhorSobreposicao = 0;
+    subs.filter(s => s.tipo === 'ativo' && s.parentId === membro.subId.split('~')[0]).forEach(s => {
+      const sobreposicao = s.lotes.filter(l => lotesOriginais.has(l)).length;
+      if (sobreposicao > melhorSobreposicao) { melhorSobreposicao = sobreposicao; melhor = s; }
+    });
+    if (melhor) return melhor;
+  }
+  // 3) Fallback (vínculos antigos sem lotes salvos): maior peça ativa da
+  // mesma quadra fiscal — pode errar se houver mais de um pedaço, mas é
+  // melhor que nada encontrar.
   const candidatos = subs.filter(s => s.tipo === 'ativo' && s.parentId === membro.subId.split('~')[0]);
   return candidatos.sort((a,b)=>b.n-a.n)[0] || null;
 }
@@ -3688,7 +3701,7 @@ async function marcarStatusComposicao(qidBase, lotes, status, groupId, obsNova, 
         if (membro.subId === groupId) continue;
         const subMembro = subAtualDoMembroVinculo(membro);
         if (!subMembro) continue;
-        await marcarStatusComposicao(subMembro.subId.split('-')[0], subMembro.lotes, status, subMembro.subId, obsNova, true);
+        await marcarStatusComposicao(subMembro.parentId.split('-')[0], subMembro.lotes, status, subMembro.subId, obsNova, true);
       }
       mostrarToast(`Status também aplicado à${grupo.membros.length-1===1?'':'s'} ${grupo.membros.length-1} composiç${grupo.membros.length-1===1?'ão':'ões'} vinculada${grupo.membros.length-1===1?'':'s'}.`);
     }
@@ -4076,7 +4089,7 @@ function iniciarCapturaMapa(){
     const outrosMembros = grupoVincCaptura.membros.filter(m => m.subId.split('~')[0] !== parentIdAtual);
     outrosMembros.forEach(m => {
       const subM = subAtualDoMembroVinculo(m);
-      if (subM) _desenharComposicaoNaCaptura(subM.subId.split('-')[0], subM.lotes);
+      if (subM) _desenharComposicaoNaCaptura(subM.parentId.split('-')[0], subM.lotes);
     });
     const statsV = statsVinculo(grupoVincCaptura.grupoId);
     if (statsV) tituloCaptura = `${statsV.detalhes.length} composições vinculadas · ${statsV.area.toLocaleString('pt-BR')} m²`;
@@ -4575,8 +4588,8 @@ function lotePopupHTML(sql, groupId) {
       <button style="flex:1;min-width:56px;font-size:10.5px;padding:4px 4px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:${stL.status==='naoedificavel'?'#8a8a8a':'#fff'};color:${corTexto('naoedificavel')}"
         onclick="toggleLoteStatus('${sql}','naoedificavel','${groupId}')">🌳 Não Edif.</button>
     </div>
-    ${prospeccoesComLote(groupId.split('-')[0], sql.split('.')[2]).length ? `<button style="width:100%;font-size:10px;padding:4px 4px;margin-bottom:6px;border-radius:4px;border:1px solid #1565c0;color:#1565c0;background:#eef4fc;cursor:pointer"
-      onclick="retirarLoteDaComposicaoAtiva('${sql}','${groupId.split('-')[0]}',selectedBairro)">↩️ Retirar este lote da composição</button>` : ''}
+    ${prospeccoesComLote(groupId.split('~')[0].split('-')[0], sql.split('.')[2]).length ? `<button style="width:100%;font-size:10px;padding:4px 4px;margin-bottom:6px;border-radius:4px;border:1px solid #1565c0;color:#1565c0;background:#eef4fc;cursor:pointer"
+      onclick="retirarLoteDaComposicaoAtiva('${sql}','${groupId.split('~')[0].split('-')[0]}',selectedBairro)">↩️ Retirar este lote da composição</button>` : ''}
     <textarea id="popup-obs-${safeId}" onchange="saveLoteObs('${sql}','${groupId}',this.value)"
       placeholder="Observação do lote..."
       style="width:100%;min-height:40px;border:1px solid #eee;border-radius:4px;padding:4px 6px;font-size:11px;font-family:inherit;color:#333;resize:vertical"
@@ -4585,7 +4598,7 @@ function lotePopupHTML(sql, groupId) {
 }
 
 function _desenharLotesEmCamada(groupId, lotesList) {
-  const qidBase = groupId.split('-')[0];
+  const qidBase = groupId.split('~')[0].split('-')[0];
   lotesList.forEach(l => {
     const sql = `${qidBase}.${l}`;
     const ring = LOTES_GEOM[sql];
@@ -4611,7 +4624,7 @@ function _desenharLotesEmCamada(groupId, lotesList) {
     poly._yunySql = sql;
     poly._yunyGroupId = groupId;
     const center = poly.getBounds().getCenter();
-    const iconeStatus = {obras:' 🏗', dificil:' ⚠️', futuro:' 🏢', descarte:' 🗂️', naoedificavel:' 🌳', retirado_prospeccao:' ↩️'}[st&&st.status] || '';
+    const iconeStatus = {obras:' 🏗', dificil:' ⚠️', futuro:' 🏢', descarte:' 🗂️', naoedificavel:' 🌳'}[st&&st.status] || '';
     const label = L.divIcon({
       className: '',
       html: `<div style="background:rgba(255,255,255,.9);border:1px solid #999;border-radius:3px;
@@ -4991,7 +5004,16 @@ async function concluirModoVinculo(){
   const m = _modoVinculoAtivo;
   if (!m) return;
   if (!m.selecionados.length) { mostrarToast('Nenhuma composição selecionada — nada a vincular.'); cancelarModoVinculo(); return; }
-  const todosMembros = [{tipo:'composicao', subId:m.origemSubId, bairro:m.origemBairro}, ...m.selecionados];
+  function _lotesAtuaisDoSub(subId, bairro){
+    const q = QUADRAS.find(x => x.id === subId.split('~')[0] && x.bairro === bairro);
+    if (!q) return [];
+    const sub = getSubGroups(q).find(s => s.subId === subId);
+    return sub ? sub.lotes : [];
+  }
+  const todosMembros = [
+    {tipo:'composicao', subId:m.origemSubId, bairro:m.origemBairro, lotes:_lotesAtuaisDoSub(m.origemSubId, m.origemBairro)},
+    ...m.selecionados.map(s => ({...s, lotes: s.lotes && s.lotes.length ? s.lotes : _lotesAtuaisDoSub(s.subId, s.bairro)})),
+  ];
   const grupoId = m.grupoIdExistente || `vinc_${Date.now()}`;
   const origemSubId = m.origemSubId, origemBairro = m.origemBairro;
   await salvarVinculo(grupoId, todosMembros);
