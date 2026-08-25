@@ -646,6 +646,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <select id="fonte-satelite-select" onchange="trocarFonteSatelite(this.value)" style="border:none;background:transparent;font-size:11.5px;color:#333;cursor:pointer">
         <option value="esri">🛰 Esri (padrão)</option>
         <option value="geosampa">🏙️ GeoSampa (10cm, oficial)</option>
+        <option value="mapbox">🌎 Mapbox (30cm, atualizado)</option>
       </select>
     </div>
 
@@ -657,6 +658,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <div class="layer-row"><input type="checkbox" id="ly-ou" onchange="toggleLayer('ou')"><div class="layer-swatch" style="background:rgba(245,127,23,.2);border:1.5px solid #e65100"></div><label for="ly-ou">Operações urbanas</label></div>
       <div class="layer-row"><input type="checkbox" id="ly-geoimovel" onchange="toggleLayer('geoimovel')"><div class="layer-swatch" style="background:#8e24aa;border-radius:50%;width:10px;height:10px"></div><label for="ly-geoimovel">Empreendimentos (GeoImóvel)</label></div>
       <div class="layer-row"><input type="checkbox" id="ly-itbiPontos" onchange="toggleLayer('itbiPontos')"><div class="layer-swatch" style="background:#f59e0b;border:1px solid #b45309;border-radius:50%;width:10px;height:10px"></div><label for="ly-itbiPontos">Transações de ITBI (todas)</label></div>
+      <div class="layer-row"><input type="checkbox" id="ly-loteGeosampa" onchange="toggleLayer('loteGeosampa')"><div class="layer-swatch" style="background:transparent;border:1.5px dashed #6d4c00"></div><label for="ly-loteGeosampa">Lotes oficiais (GeoSampa)</label></div>
       <div class="layer-row" style="border-top:1px solid #eee;margin-top:6px;padding-top:8px"><input type="checkbox" id="ly-regioes" checked onchange="toggleCamadaRegioes()"><div class="layer-swatch" style="background:#5c6bc0;opacity:.35;border:1.5px dashed #5c6bc0"></div><label for="ly-regioes">Regiões disponíveis (<span id="contador-regioes-disponiveis">108</span>) — clique no mapa p/ carregar</label></div>
     </div>
 
@@ -2235,12 +2237,26 @@ function criarCamadaGeoSampa() {
     crossOrigin: false, // servidor da prefeitura pode não ter CORS habilitado
   });
 }
+// Mapbox Satellite: mosaico Maxar Vivid de 30cm, atualizado com frequência
+// (a atualização mais recente é de jan/2026) — token público do Matheus,
+// restrito por domínio nas configurações da conta dele no Mapbox.
+const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF0aGV1c2ZtYXJpYSIsImEiOiJjbXQ5MGI3eDMwMmluMnhvYWtzNzkzcTQ3In0._Fr4eoeNzs7h0jGVkgFCmQ';
+function criarCamadaMapbox() {
+  return L.tileLayer(`https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}{r}.jpg90?access_token=${MAPBOX_TOKEN}`, {
+    attribution: '© Mapbox © Maxar',
+    maxZoom: 21,
+    maxNativeZoom: 19,
+    tileSize: 256,
+    detectRetina: true, // usa @2x automaticamente em telas retina — mais nítido
+    crossOrigin: false,
+  });
+}
 function trocarFonteSatelite(fonte) {
   const estavaVisivel = map.hasLayer(basemapSatelite);
   if (estavaVisivel) map.removeLayer(basemapSatelite);
-  basemapSatelite = fonte === 'geosampa'
-    ? criarCamadaGeoSampa()
-    : L.tileLayer(TILES_SAT_ATUAL, {attribution: ATTR_SAT, maxZoom: 19, crossOrigin: TILES_COM_CORS});
+  if (fonte === 'geosampa') basemapSatelite = criarCamadaGeoSampa();
+  else if (fonte === 'mapbox') basemapSatelite = criarCamadaMapbox();
+  else basemapSatelite = L.tileLayer(TILES_SAT_ATUAL, {attribution: ATTR_SAT, maxZoom: 19, crossOrigin: TILES_COM_CORS});
   basemapSatelite.on('tileerror', _onTileError);
   if (estavaVisivel) basemapSatelite.addTo(map);
 }
@@ -2267,6 +2283,15 @@ const layers = {
   zona: L.layerGroup(),
   ou: L.layerGroup(),
   geoimovel: L.layerGroup(),
+  // Lotes oficiais do cadastro fiscal da Prefeitura (GeoSampa, WMS) — pra
+  // comparar visualmente com os nossos próprios contornos de lote (às
+  // vezes divergem um pouco, útil pra conferência). minZoom alto de
+  // propósito: em zoom afastado são milhões de lotes, sem serventia
+  // visual e só sobrecarregando o servidor da prefeitura à toa.
+  loteGeosampa: L.tileLayer.wms('http://wms.geosampa.prefeitura.sp.gov.br/geoserver/geoportal/wms', {
+    layers: 'geoportal:lote_cidadao', format: 'image/png', transparent: true, version: '1.3.0',
+    attribution: 'Lotes: Prefeitura de São Paulo (GeoSampa)', maxZoom: 21, minZoom: 15, crossOrigin: false,
+  }),
   // Cluster (não layerGroup simples) — a camada de pontos de ITBI tem
   // ~29 mil marcadores; sem agrupar visualmente por zoom o navegador
   // travaria e o mapa ficaria ilegível de longe.
