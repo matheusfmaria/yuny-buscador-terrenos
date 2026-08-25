@@ -4046,28 +4046,45 @@ function iniciarCapturaMapa(){
   const grupo = L.featureGroup().addTo(map);
   _captura.layer = grupo;
 
-  sub.lotes.forEach(l => {
-    const ring = LOTES_GEOM[`${qidBase}.${l}`];
-    if (!ring || ring.length < 3) return;
-    L.polygon(ring.map(c=>[c[1],c[0]]), {
-      renderer: rend, color: YUNY_CIANO, weight: 1.4, opacity: 0.9,
-      fillColor: YUNY_CIANO, fillOpacity: 0.25, interactive: false
-    }).addTo(grupo);
-  });
+  function _desenharComposicaoNaCaptura(qidBaseDesenho, lotesDesenho){
+    lotesDesenho.forEach(l => {
+      const ring = LOTES_GEOM[`${qidBaseDesenho}.${l}`];
+      if (!ring || ring.length < 3) return;
+      L.polygon(ring.map(c=>[c[1],c[0]]), {
+        renderer: rend, color: YUNY_CIANO, weight: 1.4, opacity: 0.9,
+        fillColor: YUNY_CIANO, fillOpacity: 0.25, interactive: false
+      }).addTo(grupo);
+    });
+    // Contorno externo da composição (união real dos lotes), mais grosso
+    const latlngsUniao = geoJSONToLatLngs(unionLotesPolygon(qidBaseDesenho, lotesDesenho));
+    if (latlngsUniao.length) {
+      L.polygon(latlngsUniao, {
+        renderer: rend, color: YUNY_CIANO, weight: 3.5, opacity: 1,
+        fill: false, interactive: false
+      }).addTo(grupo);
+    }
+  }
+  _desenharComposicaoNaCaptura(qidBase, sub.lotes);
 
-  // Contorno externo da composição (união real dos lotes), mais grosso
-  const latlngsUniao = geoJSONToLatLngs(unionLotesPolygon(qidBase, sub.lotes));
-  if (latlngsUniao.length) {
-    L.polygon(latlngsUniao, {
-      renderer: rend, color: YUNY_CIANO, weight: 3.5, opacity: 1,
-      fill: false, interactive: false
-    }).addTo(grupo);
+  // Composições vinculadas (ver iniciarModoVinculo): a captura de imagem
+  // pro e-mail de prospecção precisa mostrar TODAS as partes juntas, não
+  // só a que estava aberta — senão a imagem anexada ficava incompleta.
+  let tituloCaptura = `Quadra ${sub.subId} · ${sub.area.toLocaleString('pt-BR')} m²`;
+  const grupoVincCaptura = grupoVinculoDoSubId(sub.subId);
+  if (grupoVincCaptura) {
+    const parentIdAtual = sub.subId.split('~')[0];
+    const outrosMembros = grupoVincCaptura.membros.filter(m => m.subId.split('~')[0] !== parentIdAtual);
+    outrosMembros.forEach(m => {
+      const subM = subAtualDoMembroVinculo(m);
+      if (subM) _desenharComposicaoNaCaptura(subM.subId.split('-')[0], subM.lotes);
+    });
+    const statsV = statsVinculo(grupoVincCaptura.grupoId);
+    if (statsV) tituloCaptura = `${statsV.detalhes.length} composições vinculadas · ${statsV.area.toLocaleString('pt-BR')} m²`;
   }
 
   // Tela cheia limpa
   document.body.classList.add('modo-captura');
-  document.getElementById('captura-titulo').textContent =
-    `Quadra ${sub.subId} · ${sub.area.toLocaleString('pt-BR')} m²`;
+  document.getElementById('captura-titulo').textContent = tituloCaptura;
   document.getElementById('captura-barra').style.display = 'flex';
   _dicaCaptura('Ajuste o enquadramento (arraste e use o scroll) e clique em "Selecionar área".');
   _sincronizarBotoesCaptura(map.hasLayer(basemapSatelite) ? 'satelite' : 'mapa');
