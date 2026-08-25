@@ -646,6 +646,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <select id="fonte-satelite-select" onchange="trocarFonteSatelite(this.value)" style="border:none;background:transparent;font-size:11.5px;color:#333;cursor:pointer">
         <option value="esri">🛰 Esri (padrão)</option>
         <option value="geosampa">🏙️ GeoSampa (10cm, oficial)</option>
+        <option value="mapbox">🌎 Mapbox (30cm, atualizado)</option>
       </select>
     </div>
 
@@ -2236,12 +2237,26 @@ function criarCamadaGeoSampa() {
     crossOrigin: false, // servidor da prefeitura pode não ter CORS habilitado
   });
 }
+// Mapbox Satellite: mosaico Maxar Vivid de 30cm, atualizado com frequência
+// (a atualização mais recente é de jan/2026) — token público do Matheus,
+// restrito por domínio nas configurações da conta dele no Mapbox.
+const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF0aGV1c2ZtYXJpYSIsImEiOiJjbXQ5MGY3anMwMTEwMndwamZ4N2hsaGJqIn0.uDMuinLppkl0TGFuQOgRDw';
+function criarCamadaMapbox() {
+  return L.tileLayer(`https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}{r}.jpg90?access_token=${MAPBOX_TOKEN}`, {
+    attribution: '© Mapbox © Maxar',
+    maxZoom: 21,
+    maxNativeZoom: 19,
+    tileSize: 256,
+    detectRetina: true, // usa @2x automaticamente em telas retina — mais nítido
+    crossOrigin: false,
+  });
+}
 function trocarFonteSatelite(fonte) {
   const estavaVisivel = map.hasLayer(basemapSatelite);
   if (estavaVisivel) map.removeLayer(basemapSatelite);
-  basemapSatelite = fonte === 'geosampa'
-    ? criarCamadaGeoSampa()
-    : L.tileLayer(TILES_SAT_ATUAL, {attribution: ATTR_SAT, maxZoom: 19, crossOrigin: TILES_COM_CORS});
+  if (fonte === 'geosampa') basemapSatelite = criarCamadaGeoSampa();
+  else if (fonte === 'mapbox') basemapSatelite = criarCamadaMapbox();
+  else basemapSatelite = L.tileLayer(TILES_SAT_ATUAL, {attribution: ATTR_SAT, maxZoom: 19, crossOrigin: TILES_COM_CORS});
   basemapSatelite.on('tileerror', _onTileError);
   if (estavaVisivel) basemapSatelite.addTo(map);
 }
