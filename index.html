@@ -4647,9 +4647,16 @@ function subPassaFiltrosNumericos(q, sub) {
     const todosOcultos = sub.lotes.every(l => RESTRICOES_OCULTAS.has((STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status));
     return !todosOcultos;
   }
-  if (sub.area < qfilters.areaMin || sub.area > qfilters.areaMax) return false;
-  if (sub.score < qfilters.scoreMin || sub.score > qfilters.scoreMax) return false;
-  const vgvMi = sub.vgv / 1e6; // compara em milhões, mesma unidade dos campos
+  // Composições vinculadas (ver iniciarModoVinculo): pra fins de filtro,
+  // área/score/VGV usam o total combinado (mesmo critério já usado na
+  // ficha) — senão uma vila dividida em duas partes pequenas nunca
+  // aparecia com o filtro de área mínima, mesmo somando mais que isso.
+  let areaParaFiltro = sub.area, scoreParaFiltro = sub.score, vgvParaFiltro = sub.vgv;
+  const comboFiltro = statsCombinadoParaFicha(sub.subId, q, currentProfile==='compacto');
+  if (comboFiltro) { areaParaFiltro = comboFiltro.area; scoreParaFiltro = comboFiltro.score; vgvParaFiltro = comboFiltro.vgv; }
+  if (areaParaFiltro < qfilters.areaMin || areaParaFiltro > qfilters.areaMax) return false;
+  if (scoreParaFiltro < qfilters.scoreMin || scoreParaFiltro > qfilters.scoreMax) return false;
+  const vgvMi = vgvParaFiltro / 1e6; // compara em milhões, mesma unidade dos campos
   if (vgvMi < qfilters.vgvMin || vgvMi > qfilters.vgvMax) return false;
   const precoQ = q.precoLocal || 0;
   if (precoQ < qfilters.precoMin || precoQ > qfilters.precoMax) return false;
@@ -4735,6 +4742,17 @@ function grupoVinculoDoSubId(subId){
     if ((dados.membros||[]).some(m => m.subId === subId)) return {grupoId, ...dados};
   }
   return null;
+}
+// Uma composição deve aparecer destacada no mapa se ela mesma está
+// selecionada OU se está vinculada à composição atualmente selecionada —
+// pedido do Matheus: clicar em qualquer uma das vinculadas deve destacar
+// as duas juntas, já que a ficha já mostra os dados combinados.
+function estaSelecionadoOuVinculado(subId, bairro){
+  if (subId === selectedSubId && bairro === selectedBairro) return true;
+  if (!selectedSubId) return false;
+  const grupo = grupoVinculoDoSubId(selectedSubId);
+  if (!grupo) return false;
+  return grupo.membros.some(m => m.subId === subId && m.bairro === bairro);
 }
 function statsVinculo(grupoId){
   const grupo = VINCULOS_CACHE[grupoId];
@@ -4964,7 +4982,7 @@ function renderQuadraMarkers() {
       // acontecer, mas mantém o fallback por segurança).
       const corBase = temEmpreendimentoSobreposto(q.id.split('-')[0], subs[0].lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(subs[0].score);
       const c=corComposicao(q.id, corBase, subs[0].lotes);
-      const sel=q.id===selectedQid && q.bairro===selectedBairro;
+      const sel=estaSelecionadoOuVinculado(q.id, q.bairro);
       let layer;
       if(geom){
         const latlngs=geomToLatLngs(geom);
@@ -5005,7 +5023,7 @@ function renderQuadraMarkers() {
       const restrito = sub.tipo==='restrito';
       const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(sub.score);
       const c = corComposicao(sub.subId, restrito ? corComposicaoRestrita(qidBase, sub.lotes) : corBaseAtivo, sub.lotes);
-      const sel=q.id===selectedQid && sub.subId===selectedSubId && q.bairro===selectedBairro;
+      const sel=estaSelecionadoOuVinculado(sub.subId, q.bairro);
       const unioned = unionLotesPolygonCached(qidBase, sub.lotes);
       const latlngs = geoJSONToLatLngs(unioned);
       if (!latlngs.length) return;
@@ -5714,7 +5732,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
         ? corComposicaoRestrita(qidBaseLayer, st.lotes)
         : (temEmpreendimentoSobreposto(qidBaseLayer, st.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(st.score));
       const _c= corComposicao(layer._yunySubId, corBase, st.lotes);
-      const _sel = layer._yunySubId===selectedSubId && layer._yunyBairro===q.bairro;
+      const _sel = estaSelecionadoOuVinculado(layer._yunySubId, layer._yunyBairro);
       const _style={color:_c,weight:_sel?2.5:1.5,fillColor:_c,fillOpacity:_sel?0.55:0.3,dashArray:_sel?null:'3,2'};
       if(layer.setStyle) layer.setStyle(_style);
     }
