@@ -2413,6 +2413,11 @@ function getSubGroups(q) {
     const restritosSet = new Set(restritos);
     const statusPorLoteR = {};
     restritos.forEach(l => { statusPorLoteR[l] = (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status || 'restrito'; });
+    // Zona de cada lote restrito — só precisa pra calcular score/VGV dos
+    // que são 'retirado_prospeccao' (ver abaixo); as demais restrições
+    // continuam sem score, então não precisam disso.
+    const zonaPorLoteR = {};
+    restritos.forEach(l => { zonaPorLoteR[l] = zonaDoLote(qidBase, l, q); });
     const adjR = {};
     restritos.forEach(l => { adjR[l] = new Set(); });
     edgesR.forEach(([a,b]) => {
@@ -2431,9 +2436,21 @@ function getSubGroups(q) {
       }
       let area = 0;
       comp.forEach(l => { area += LOTES_AREA[`${qidBase}.${l}`] || 0; });
+      area = Math.round(area);
+      const status = statusPorLoteR[start];
+      // "Retirado da composição" não é uma restrição de verdade (obra,
+      // difícil, etc.) — o lote continua disponível pra prospecção, só não
+      // faz mais parte DESTA composição específica. Por isso tem score e
+      // VGV normais, como qualquer composição ativa, em vez de null.
+      const ehRetirado = status === 'retirado_prospeccao';
+      const zonaR = zonaPorLoteR[start];
+      const qzR = zonaR === q.zona ? q : { ...q, zona: zonaR };
       subsRestritos.push({
-        parentId: q.id, lotes: comp, area: Math.round(area), n: comp.length,
-        score: null, vgv: null, tipo: 'restrito', statusRestricao: statusPorLoteR[start],
+        parentId: q.id, lotes: comp, area, n: comp.length,
+        zona: ehRetirado ? zonaR : undefined,
+        score: ehRetirado ? getScoreForStats(qzR, area, comp.length, comp) : null,
+        vgv: ehRetirado ? calcVGVForArea(qzR, area) : null,
+        tipo: 'restrito', statusRestricao: status,
       });
     });
   }
@@ -2826,18 +2843,64 @@ function iniciarSincronizacaoProspeccao(){
   });
 }
 
-async function marcarProspeccaoAtiva(subId, dados){
+// Resolve o subgrupo ATUAL de um membro de vínculo — o subId gravado no
+// vínculo pode ficar desatualizado se a composição se dividir depois (ex:
+// um lote foi excluído e ela virou duas partes com sufixo ~N novo).
+// parentId (o id cheio da quadra fiscal variante, tipo "016.074-c") é
+// estável e nunca muda, então usamos ele como fallback: se o subId exato
+// não existir mais, pega a maior peça ATIVA que ainda pertence à mesma
+// quadra fiscal variante.
+function subAtualDoMembroVinculo(membro){
+  const qMembro = QUADRAS.find(x => x.id === membro.subId.split('~')[0] && x.bairro === membro.bairro);
+  if (!qMembro) return null;
+  const subs = getSubGroups(qMembro);
+  const exato = subs.find(s => s.subId === membro.subId);
+  if (exato) return exato;
+  const candidatos = subs.filter(s => s.tipo === 'ativo' && s.parentId === membro.subId.split('~')[0]);
+  return candidatos.sort((a,b)=>b.n-a.n)[0] || null;
+}
+async function marcarProspeccaoAtiva(subId, dados, _pulandoPropagacao){
   PROSPECCAO_STATUS_CACHE[subId] = dados; // otimista
-  if (!_fbAtivo) return;
-  try { await _fbDb.ref('prospeccao_status/'+sqlToFbKey(subId)).set(dados); }
-  catch(e) { console.warn('Não foi possível salvar o status de prospecção:', e); }
+  if (_fbAtivo) {
+    try { await _fbDb.ref('prospeccao_status/'+sqlToFbKey(subId)).set(dados); }
+    catch(e) { console.warn('Não foi possível salvar o status de prospecção:', e); }
+  }
+  // Composições vinculadas (ver iniciarModoVinculo) entram em prospecção
+  // juntas — enviar prospecção de uma marca todas as outras da mesma
+  // negociação também, com o mesmo corretor/data.
+  if (!_pulandoPropagacao) {
+    const grupo = grupoVinculoDoSubId(subId);
+    if (grupo) {
+      for (const membro of grupo.membros) {
+        if (membro.subId.split('~')[0] === subId.split('~')[0]) continue;
+        const subMembro = subAtualDoMembroVinculo(membro);
+        if (!subMembro) continue;
+        await marcarProspeccaoAtiva(subMembro.subId,
+          {...dados, subId: subMembro.subId, qid: subMembro.parentId, bairro: membro.bairro, lotes: subMembro.lotes, area: subMembro.area},
+          true);
+      }
+    }
+  }
 }
 
-async function removerProspeccaoAtiva(subId){
+async function removerProspeccaoAtiva(subId, _pulandoPropagacao){
   delete PROSPECCAO_STATUS_CACHE[subId]; // otimista
-  if (!_fbAtivo) return;
-  try { await _fbDb.ref('prospeccao_status/'+sqlToFbKey(subId)).remove(); }
-  catch(e) { console.warn('Não foi possível remover o status de prospecção:', e); }
+  if (_fbAtivo) {
+    try { await _fbDb.ref('prospeccao_status/'+sqlToFbKey(subId)).remove(); }
+    catch(e) { console.warn('Não foi possível remover o status de prospecção:', e); }
+  }
+  // Idem: retirar prospecção de uma composição vinculada retira das
+  // outras da mesma negociação também.
+  if (!_pulandoPropagacao) {
+    const grupo = grupoVinculoDoSubId(subId);
+    if (grupo) {
+      for (const membro of grupo.membros) {
+        if (membro.subId !== subId && PROSPECCAO_STATUS_CACHE[membro.subId]) {
+          await removerProspeccaoAtiva(membro.subId, true);
+        }
+      }
+    }
+  }
 }
 
 // Retira um ou mais lotes de uma prospecção ativa — encolhe a lista de
@@ -2870,13 +2933,13 @@ async function migrarProspeccaoAposExclusao(qidBase, bairro, lotesExcluidos, mot
   for (const subIdAntigo of subIdsAfetados) {
     const dados = PROSPECCAO_STATUS_CACHE[subIdAntigo];
     if (!dados) continue;
-    await removerProspeccaoAtiva(subIdAntigo);
+    await removerProspeccaoAtiva(subIdAntigo, true);
     const lotesRestantesEsperados = new Set((dados.lotes||[]).filter(l => !lotesExcluidosSet.has(l)));
     if (!lotesRestantesEsperados.size) continue; // não sobrou lote nenhum dessa prospecção
     for (const novoSub of novosSubs) {
       const todosCobertos = novoSub.lotes.length>0 && novoSub.lotes.every(l => lotesRestantesEsperados.has(l));
       if (todosCobertos) {
-        await marcarProspeccaoAtiva(novoSub.subId, {...dados, subId: novoSub.subId, lotes: novoSub.lotes, area: novoSub.area});
+        await marcarProspeccaoAtiva(novoSub.subId, {...dados, subId: novoSub.subId, lotes: novoSub.lotes, area: novoSub.area}, true);
         await adicionarHistoricoComposicao(novoSub.subId, motivoHistorico, null);
       }
     }
@@ -3623,11 +3686,9 @@ async function marcarStatusComposicao(qidBase, lotes, status, groupId, obsNova, 
     if (grupo) {
       for (const membro of grupo.membros) {
         if (membro.subId === groupId) continue;
-        const qMembro = QUADRAS.find(x => x.id === membro.subId.split('~')[0] && x.bairro === membro.bairro);
-        if (!qMembro) continue;
-        const subMembro = getSubGroups(qMembro).find(s => s.subId === membro.subId);
+        const subMembro = subAtualDoMembroVinculo(membro);
         if (!subMembro) continue;
-        await marcarStatusComposicao(membro.subId.split('-')[0], subMembro.lotes, status, membro.subId, obsNova, true);
+        await marcarStatusComposicao(subMembro.subId.split('-')[0], subMembro.lotes, status, subMembro.subId, obsNova, true);
       }
       mostrarToast(`Status também aplicado à${grupo.membros.length-1===1?'':'s'} ${grupo.membros.length-1} composiç${grupo.membros.length-1===1?'ão':'ões'} vinculada${grupo.membros.length-1===1?'':'s'}.`);
     }
@@ -4506,11 +4567,8 @@ function lotePopupHTML(sql, groupId) {
   </div>`;
 }
 
-function showLotesOnMap(groupId, lotesList) {
-  clearLotesLayer();
+function _desenharLotesEmCamada(groupId, lotesList) {
   const qidBase = groupId.split('-')[0];
-  lotesLayer = L.layerGroup().addTo(map);
-
   lotesList.forEach(l => {
     const sql = `${qidBase}.${l}`;
     const ring = LOTES_GEOM[sql];
@@ -4523,8 +4581,12 @@ function showLotesOnMap(groupId, lotesList) {
     // 'descarte', 'naoedificavel' ou o novo 'retirado_prospeccao' caíam no
     // azul padrão por engano (parecia que o lote continuava "normal"/em
     // prospecção mesmo depois de excluído da composição).
+    // EXCEÇÃO: 'retirado_prospeccao' continua colorido como um lote normal —
+    // não é uma restrição de verdade (obra, difícil etc.), só significa que
+    // ele saiu desta composição específica, mas continua disponível pra
+    // prospecção como qualquer outro.
     let color = '#1565c0', fillColor = '#1565c0', fillOpacity = 0.3;
-    if (st && st.status && CORES_RESTRICAO[st.status]) {
+    if (st && st.status && st.status !== 'retirado_prospeccao' && CORES_RESTRICAO[st.status]) {
       color = CORES_RESTRICAO[st.status]; fillColor = color; fillOpacity = 0.25;
     }
 
@@ -4546,6 +4608,25 @@ function showLotesOnMap(groupId, lotesList) {
     // (candidatosNoClique), que decide se há mais de uma coisa nesse local
     // (por exemplo, um empreendimento no meio da composição selecionada).
     poly.addTo(lotesLayer);
+  });
+}
+function showLotesOnMap(groupId, lotesList) {
+  clearLotesLayer();
+  lotesLayer = L.layerGroup().addTo(map);
+  _desenharLotesEmCamada(groupId, lotesList);
+}
+// Composições vinculadas: mostra os lotes de TODAS as vinculadas de uma
+// vez, no mesmo formato — pedido do Matheus: clicar em qualquer uma das
+// vinculadas deve mostrar o mesmo nível de detalhe (lote a lote) que a
+// composição clicada diretamente, não só um contorno destacado.
+function showLotesOnMapComVinculo(groupIdPrincipal, lotesPrincipal, membrosOutros) {
+  clearLotesLayer();
+  lotesLayer = L.layerGroup().addTo(map);
+  _desenharLotesEmCamada(groupIdPrincipal, lotesPrincipal);
+  membrosOutros.forEach(m => {
+    const subMembro = subAtualDoMembroVinculo(m);
+    if (!subMembro) return;
+    _desenharLotesEmCamada(subMembro.subId, subMembro.lotes);
   });
 }
 // ── FIM STATUS POR LOTE ────────────────────────────────────────────────
@@ -4738,8 +4819,13 @@ const VILAS_POTENCIAIS = {};
 let VINCULOS_CACHE = {}; // grupoId -> {membros:[{tipo:'composicao',subId,bairro}], criadoEm}
 
 function grupoVinculoDoSubId(subId){
+  // Compara pelo parentId (a quadra fiscal variante inteira, ex:
+  // "016.074-c") em vez do subId exato — o subId gravado no vínculo pode
+  // ficar desatualizado se a composição se dividir depois de vinculada
+  // (ex: um lote foi excluído e ela virou "016.074-c~1"/"~2" novos).
+  const parentIdAlvo = subId.split('~')[0];
   for (const [grupoId, dados] of Object.entries(VINCULOS_CACHE)) {
-    if ((dados.membros||[]).some(m => m.subId === subId)) return {grupoId, ...dados};
+    if ((dados.membros||[]).some(m => m.subId.split('~')[0] === parentIdAlvo)) return {grupoId, ...dados};
   }
   return null;
 }
@@ -4752,19 +4838,18 @@ function estaSelecionadoOuVinculado(subId, bairro){
   if (!selectedSubId) return false;
   const grupo = grupoVinculoDoSubId(selectedSubId);
   if (!grupo) return false;
-  return grupo.membros.some(m => m.subId === subId && m.bairro === bairro);
+  const parentIdAlvo = subId.split('~')[0];
+  return grupo.membros.some(m => m.bairro === bairro && m.subId.split('~')[0] === parentIdAlvo);
 }
 function statsVinculo(grupoId){
   const grupo = VINCULOS_CACHE[grupoId];
   if (!grupo) return null;
   let area = 0, n = 0;
   const detalhes = grupo.membros.map(m => {
-    const q = QUADRAS.find(x => x.id === m.subId.split('~')[0] && x.bairro === m.bairro);
-    if (!q) return null;
-    const sub = getSubGroups(q).find(s => s.subId === m.subId);
+    const sub = subAtualDoMembroVinculo(m);
     if (!sub) return null;
     area += sub.area; n += sub.n;
-    return {subId: m.subId, bairro: m.bairro, area: sub.area, n: sub.n, score: sub.score};
+    return {subId: sub.subId, bairro: m.bairro, area: sub.area, n: sub.n, score: sub.score};
   }).filter(Boolean);
   return {grupoId, area: Math.round(area), n, detalhes};
 }
@@ -4780,10 +4865,10 @@ function statsCombinadoParaFicha(subIdAtual, qAtual, isCompacto){
   const grupo = grupoVinculoDoSubId(subIdAtual);
   if (!grupo) return null;
   const membros = grupo.membros.map(m => {
+    const subM = subAtualDoMembroVinculo(m);
+    if (!subM || subM.tipo !== 'ativo') return null;
     const qm = QUADRAS.find(x => x.id === m.subId.split('~')[0] && x.bairro === m.bairro);
     if (!qm) return null;
-    const subM = getSubGroups(qm).find(s => s.subId === m.subId);
-    if (!subM || subM.tipo !== 'ativo') return null;
     const preco = isCompacto ? (qm.precoLocalCompacto||VGV_PRECO[qm.bairro]||14000) : (qm.precoLocal||VGV_PRECO[qm.bairro]||14000);
     return {sub: subM, q: qm, preco};
   }).filter(Boolean);
@@ -4805,7 +4890,8 @@ async function salvarVinculo(grupoId, membros){
 async function removerDoVinculo(grupoId, subId){
   const grupo = VINCULOS_CACHE[grupoId];
   if (!grupo) return;
-  const membrosRestantes = grupo.membros.filter(m => m.subId !== subId);
+  const parentIdAlvo = subId.split('~')[0];
+  const membrosRestantes = grupo.membros.filter(m => m.subId.split('~')[0] !== parentIdAlvo);
   if (membrosRestantes.length < 2) {
     // sobrou 0 ou 1 membro — não é mais um vínculo, apaga o grupo inteiro
     delete VINCULOS_CACHE[grupoId];
@@ -4840,8 +4926,14 @@ function iniciarModoVinculo(subIdOrigem, bairroOrigem){
   _modoVinculoAtivo = {origemSubId: subIdOrigem, origemBairro: bairroOrigem, selecionados: [], grupoIdExistente: null};
   const grupoExistente = grupoVinculoDoSubId(subIdOrigem);
   if (grupoExistente) {
+    const parentIdOrigem = subIdOrigem.split('~')[0];
     _modoVinculoAtivo.grupoIdExistente = grupoExistente.grupoId;
-    _modoVinculoAtivo.selecionados = grupoExistente.membros.filter(m => m.subId !== subIdOrigem);
+    _modoVinculoAtivo.selecionados = grupoExistente.membros
+      .filter(m => m.subId.split('~')[0] !== parentIdOrigem)
+      .map(m => {
+        const subAtual = subAtualDoMembroVinculo(m);
+        return subAtual ? {tipo:'composicao', subId: subAtual.subId, bairro: m.bairro} : m;
+      });
   }
   document.getElementById('vinculo-barra').style.display = 'flex';
   atualizarContadorVinculo();
@@ -5020,7 +5112,7 @@ function renderQuadraMarkers() {
     const qidBase = q.id.split('-')[0];
     subs.forEach(sub=>{
       if (!subPassaFiltrosNumericos(q, sub)) return;
-      const restrito = sub.tipo==='restrito';
+      const restrito = sub.tipo==='restrito' && sub.statusRestricao!=='retirado_prospeccao';
       const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(sub.score);
       const c = corComposicao(sub.subId, restrito ? corComposicaoRestrita(qidBase, sub.lotes) : corBaseAtivo, sub.lotes);
       const sel=estaSelecionadoOuVinculado(sub.subId, q.bairro);
@@ -5156,7 +5248,7 @@ function renderQuadraList() {
   if(!sorted.length){el.innerHTML=vilaCardsHtml.join('') || '<div style="padding:20px;text-align:center;color:#aaa;font-size:13px">Nenhuma quadra.</div>';return;}
   el.innerHTML=vilaCardsHtml.join('')+sorted.map(({q,sub})=>{
     const sel = q.id===selectedQid && sub.subId===selectedSubId && q.bairro===selectedBairro;
-    const restrito = sub.tipo==='restrito';
+    const restrito = sub.tipo==='restrito' && sub.statusRestricao!=='retirado_prospeccao';
     return `
     <div class="qcard ${sel?'sel':''}" onclick="selectQuadra('${q.id}','${sub.subId}',false,'${q.bairro.replace(/'/g,"\\'")}')" style="${restrito?'opacity:0.75':''}">
       <div class="card-top">
@@ -5728,7 +5820,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     const st=findSubById(layer._yunySubId, layer._yunyBairro);
     if (st) {
       const qidBaseLayer = st.parentId.split('-')[0];
-      const corBase = st.tipo==='restrito'
+      const corBase = (st.tipo==='restrito' && st.statusRestricao!=='retirado_prospeccao')
         ? corComposicaoRestrita(qidBaseLayer, st.lotes)
         : (temEmpreendimentoSobreposto(qidBaseLayer, st.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(st.score));
       const _c= corComposicao(layer._yunySubId, corBase, st.lotes);
@@ -5763,15 +5855,25 @@ function selectQuadra(qid, subId, manterView, bairroHint){
   }
   // Mostra no mapa e na ficha só os lotes desta parte específica — sem misturar
   // com lotes restritos (a menos que a própria parte seja a composição restrita)
-  // nem com lotes de outras composições ativas vizinhas
-  showLotesOnMap(qid, activeSub.lotes);
+  // nem com lotes de outras composições ativas vizinhas. Exceção: composições
+  // vinculadas mostram os lotes de TODAS juntas, no mesmo formato — pedido
+  // do Matheus, já que a ficha também trata elas como um bloco único.
+  const grupoVincAoAbrir = grupoVinculoDoSubId(activeSub.subId);
+  if (grupoVincAoAbrir) {
+    const outrosMembros = grupoVincAoAbrir.membros.filter(m => m.subId !== activeSub.subId);
+    showLotesOnMapComVinculo(qid, activeSub.lotes, outrosMembros);
+  } else {
+    showLotesOnMap(qid, activeSub.lotes);
+  }
   openDetail();
   if (_stats.tipo === 'restrito') {
     const labelRestricao = LABEL_RESTRICAO[_stats.statusRestricao] || 'restrito';
+    const ehRetiradoProspeccao = _stats.statusRestricao === 'retirado_prospeccao';
+    const corBadgeHd = ehRetiradoProspeccao ? scoreColor(_stats.score) : corComposicaoRestrita(q.id.split('-')[0],_stats.lotes);
     document.getElementById('detail').innerHTML = `
     <div class="detail-close" onclick="closeDetail()">✕ Fechar</div>
     <div class="dp-hd">
-      <div class="dp-sql">Quadra ${_stats.subId} <span style="font-size:10px;background:${corComposicaoRestrita(q.id.split('-')[0],_stats.lotes)};color:#fff;border-radius:3px;padding:1px 6px">${labelRestricao}</span></div>
+      <div class="dp-sql">Quadra ${_stats.subId} <span style="font-size:10px;background:${corBadgeHd};color:#fff;border-radius:3px;padding:1px 6px">${labelRestricao}</span></div>
       <div class="dp-sub">${q.bairro} ${zonePill(q.zona)}</div>
     </div>
     ${htmlAvisoDescarteAtivo(q.id)}
@@ -5794,10 +5896,12 @@ function selectQuadra(qid, subId, manterView, bairroHint){
         <button class="act-btn" style="margin-top:6px;padding:3px 8px;font-size:10.5px" onclick="removerDoVinculo('${grupoVinc.grupoId}','${_stats.subId}')">Desvincular esta composição</button>
       </div>`;
     })()}
-    <div class="score-box" style="background:#f2f2f2">
-      <div class="score-lbl">Lotes com restrição — ${labelRestricao}</div>
-      <div class="score-num" style="color:#757575">${_stats.area.toLocaleString('pt-BR')}<span style="font-size:13px;color:#aaa"> m²</span></div>
-      <div style="font-size:12px;color:#555;margin-top:4px">${_stats.n} lote(s) — não entram no cálculo de score/VGV enquanto restritos. Desmarque a restrição no lote pra devolvê-lo à composição.</div>
+    <div class="score-box" style="background:${ehRetiradoProspeccao?'#fff':'#f2f2f2'}">
+      <div class="score-lbl">${ehRetiradoProspeccao?'Lote(s) retirado(s) de outra composição':'Lotes com restrição'} — ${labelRestricao}</div>
+      <div class="score-num" style="color:${ehRetiradoProspeccao?scoreColor(_stats.score):'#757575'}">${_stats.area.toLocaleString('pt-BR')}<span style="font-size:13px;color:#aaa"> m²</span></div>
+      <div style="font-size:12px;color:#555;margin-top:4px">${ehRetiradoProspeccao
+        ? `${_stats.n} lote(s) · score ${_stats.score} — continua disponível pra prospecção normalmente, só não faz mais parte da composição original.`
+        : `${_stats.n} lote(s) — não entram no cálculo de score/VGV enquanto restritos. Desmarque a restrição no lote pra devolvê-lo à composição.`}</div>
     </div>
     <div class="dp-sec">
       <div class="dp-st">Restrições e observações por lote</div>
