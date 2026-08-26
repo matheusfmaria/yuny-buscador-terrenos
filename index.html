@@ -2863,28 +2863,30 @@ function subAtualDoMembroVinculo(membro){
   const qMembro = QUADRAS.find(x => x.id === membro.subId.split('~')[0] && x.bairro === membro.bairro);
   if (!qMembro) return null;
   const subs = getSubGroups(qMembro);
-  // 1) subId exato ainda existe — nada mudou, caso mais comum
-  const exato = subs.find(s => s.subId === membro.subId);
-  if (exato) return exato;
-  // 2) Se guardamos a lista de lotes originais no momento do vínculo,
-  // acha a peça ATIVA atual que mais se sobrepõe a ela. Necessário
-  // porque uma quadra fiscal pode ter VÁRIOS pedaços desconectados ao
-  // mesmo tempo (ex: 016.079~2 e 016.079~7 — mesma quadra, pedaços
-  // diferentes) — só olhar "a maior peça ativa dessa quadra" (like antes)
-  // colapsava os dois num só por engano.
+  // 1) Se guardamos a lista de lotes originais no momento do vínculo,
+  // acha a peça atual (ativa OU restrita) que mais se sobrepõe a ela.
+  // Prioridade MÁXIMA — na frente até do match exato de subId — porque o
+  // rótulo "~N" é reatribuído por índice sempre que o conjunto de
+  // subgrupos muda de tamanho/ordem (ex: duas restrições diferentes
+  // coexistindo), então o MESMO texto "~2" pode passar a apontar pra uma
+  // peça FISICAMENTE DIFERENTE de uma chamada pra outra. Só o conteúdo
+  // (quais lotes) identifica a composição de forma confiável.
   if (membro.lotes && membro.lotes.length) {
     const lotesOriginais = new Set(membro.lotes);
     let melhor = null, melhorSobreposicao = 0;
-    subs.filter(s => s.tipo === 'ativo' && s.parentId === membro.subId.split('~')[0]).forEach(s => {
+    subs.filter(s => s.parentId === membro.subId.split('~')[0]).forEach(s => {
       const sobreposicao = s.lotes.filter(l => lotesOriginais.has(l)).length;
       if (sobreposicao > melhorSobreposicao) { melhorSobreposicao = sobreposicao; melhor = s; }
     });
     if (melhor) return melhor;
   }
-  // 3) Fallback (vínculos antigos sem lotes salvos): maior peça ativa da
-  // mesma quadra fiscal — pode errar se houver mais de um pedaço, mas é
-  // melhor que nada encontrar.
-  const candidatos = subs.filter(s => s.tipo === 'ativo' && s.parentId === membro.subId.split('~')[0]);
+  // 2) Sem lotes guardados (vínculos antigos): tenta o subId exato —
+  // funciona no caso comum (nada mudou desde que o vínculo foi criado).
+  const exato = subs.find(s => s.subId === membro.subId);
+  if (exato) return exato;
+  // 3) Fallback final: maior peça da mesma quadra fiscal — pode errar se
+  // houver mais de um pedaço, mas é melhor que nada encontrar.
+  const candidatos = subs.filter(s => s.parentId === membro.subId.split('~')[0]);
   return candidatos.sort((a,b)=>b.n-a.n)[0] || null;
 }
 async function marcarProspeccaoAtiva(subId, dados, _pulandoPropagacao){
@@ -2897,12 +2899,11 @@ async function marcarProspeccaoAtiva(subId, dados, _pulandoPropagacao){
   // juntas — enviar prospecção de uma marca todas as outras da mesma
   // negociação também, com o mesmo corretor/data.
   if (!_pulandoPropagacao) {
-    const grupo = grupoVinculoDoSubId(subId);
+    const grupo = grupoVinculoDoSubId(subId, dados.bairro);
     if (grupo) {
       for (const membro of grupo.membros) {
-        if (membro.subId.split('~')[0] === subId.split('~')[0]) continue;
         const subMembro = subAtualDoMembroVinculo(membro);
-        if (!subMembro) continue;
+        if (!subMembro || subMembro.subId === subId) continue; // pula só a origem exata, não a quadra fiscal toda
         await marcarProspeccaoAtiva(subMembro.subId,
           {...dados, subId: subMembro.subId, qid: subMembro.parentId, bairro: membro.bairro, lotes: subMembro.lotes, area: subMembro.area},
           true);
@@ -2923,8 +2924,10 @@ async function removerProspeccaoAtiva(subId, _pulandoPropagacao){
     const grupo = grupoVinculoDoSubId(subId);
     if (grupo) {
       for (const membro of grupo.membros) {
-        if (membro.subId !== subId && PROSPECCAO_STATUS_CACHE[membro.subId]) {
-          await removerProspeccaoAtiva(membro.subId, true);
+        const subMembro = subAtualDoMembroVinculo(membro);
+        const subIdAtual = subMembro ? subMembro.subId : membro.subId;
+        if (subIdAtual !== subId && PROSPECCAO_STATUS_CACHE[subIdAtual]) {
+          await removerProspeccaoAtiva(subIdAtual, true);
         }
       }
     }
@@ -3710,7 +3713,7 @@ async function marcarStatusComposicao(qidBase, lotes, status, groupId, obsNova, 
   // Composições vinculadas sempre compartilham o mesmo status — o último
   // aplicado (inclusive remover, status=null) vale pra todas as vinculadas.
   if (!_pulandoPropagacao) {
-    const grupo = grupoVinculoDoSubId(groupId);
+    const grupo = grupoVinculoDoSubId(groupId, selectedBairro);
     if (grupo) {
       for (const membro of grupo.membros) {
         if (membro.subId === groupId) continue;
@@ -4100,8 +4103,7 @@ function iniciarCapturaMapa(){
   let tituloCaptura = `Quadra ${sub.subId} · ${sub.area.toLocaleString('pt-BR')} m²`;
   const grupoVincCaptura = grupoVinculoDoSubId(sub.subId);
   if (grupoVincCaptura) {
-    const parentIdAtual = sub.subId.split('~')[0];
-    const outrosMembros = grupoVincCaptura.membros.filter(m => m.subId.split('~')[0] !== parentIdAtual);
+    const outrosMembros = grupoVincCaptura.membros.filter(m => !_membroEhAComposicao(m, sub.subId));
     outrosMembros.forEach(m => {
       const subM = subAtualDoMembroVinculo(m);
       if (subM) _desenharComposicaoNaCaptura(subM.parentId.split('-')[0], subM.lotes);
@@ -4863,29 +4865,37 @@ const VILAS_POTENCIAIS = {};
 // composições envolvidas, só as agrupa visualmente/no controle.
 let VINCULOS_CACHE = {}; // grupoId -> {membros:[{tipo:'composicao',subId,bairro}], criadoEm}
 
-function grupoVinculoDoSubId(subId){
-  // Compara pelo parentId (a quadra fiscal variante inteira, ex:
-  // "016.074-c") em vez do subId exato — o subId gravado no vínculo pode
-  // ficar desatualizado se a composição se dividir depois de vinculada
-  // (ex: um lote foi excluído e ela virou "016.074-c~1"/"~2" novos).
-  const parentIdAlvo = subId.split('~')[0];
+// Um membro de vínculo só "é" uma composição específica se, depois de
+// resolvido pro seu subId ATUAL (subAtualDoMembroVinculo — que lida com
+// subIds desatualizados por adjacência/lotes, não só pela quadra fiscal
+// base), bater exatamente com ela. Comparar só pela quadra fiscal
+// ("016.074-c".split('~')[0]) é ERRADO sempre que a mesma quadra fiscal
+// tem MAIS de um pedaço vinculado (ex: 016.074-c~4, ~5 e ~6 no mesmo
+// vínculo) — todos compartilhavam o mesmo parentId e por isso qualquer
+// pedaço da quadra (vinculado ou não) acabava contando como "igual".
+function _membroEhAComposicao(membro, subId, bairro){
+  if (bairro != null && membro.bairro !== bairro) return false;
+  const subAtual = subAtualDoMembroVinculo(membro);
+  return subAtual ? subAtual.subId === subId : membro.subId === subId;
+}
+function grupoVinculoDoSubId(subId, bairro){
   for (const [grupoId, dados] of Object.entries(VINCULOS_CACHE)) {
-    if ((dados.membros||[]).some(m => m.subId.split('~')[0] === parentIdAlvo)) return {grupoId, ...dados};
+    if ((dados.membros||[]).some(m => _membroEhAComposicao(m, subId, bairro))) return {grupoId, ...dados};
   }
   return null;
 }
 // Uma composição deve aparecer destacada no mapa se ela mesma está
 // selecionada OU se está vinculada à composição atualmente selecionada —
 // pedido do Matheus: clicar em qualquer uma das vinculadas deve destacar
-// as duas juntas, já que a ficha já mostra os dados combinados.
+// as duas juntas, já que a ficha também mostra os dados combinados.
 function estaSelecionadoOuVinculado(subId, bairro){
   if (subId === selectedSubId && bairro === selectedBairro) return true;
   if (!selectedSubId) return false;
-  const grupo = grupoVinculoDoSubId(selectedSubId);
+  const grupo = grupoVinculoDoSubId(selectedSubId, selectedBairro);
   if (!grupo) return false;
-  const parentIdAlvo = subId.split('~')[0];
-  return grupo.membros.some(m => m.bairro === bairro && m.subId.split('~')[0] === parentIdAlvo);
+  return grupo.membros.some(m => _membroEhAComposicao(m, subId, bairro));
 }
+
 function statsVinculo(grupoId){
   const grupo = VINCULOS_CACHE[grupoId];
   if (!grupo) return null;
@@ -4935,8 +4945,7 @@ async function salvarVinculo(grupoId, membros){
 async function removerDoVinculo(grupoId, subId){
   const grupo = VINCULOS_CACHE[grupoId];
   if (!grupo) return;
-  const parentIdAlvo = subId.split('~')[0];
-  const membrosRestantes = grupo.membros.filter(m => m.subId.split('~')[0] !== parentIdAlvo);
+  const membrosRestantes = grupo.membros.filter(m => !_membroEhAComposicao(m, subId));
   if (membrosRestantes.length < 2) {
     // sobrou 0 ou 1 membro — não é mais um vínculo, apaga o grupo inteiro
     delete VINCULOS_CACHE[grupoId];
@@ -4969,12 +4978,11 @@ function iniciarModoVinculo(subIdOrigem, bairroOrigem){
   if (_modoVinculoAtivo) return;
   closeDetail();
   _modoVinculoAtivo = {origemSubId: subIdOrigem, origemBairro: bairroOrigem, selecionados: [], grupoIdExistente: null};
-  const grupoExistente = grupoVinculoDoSubId(subIdOrigem);
+  const grupoExistente = grupoVinculoDoSubId(subIdOrigem, bairroOrigem);
   if (grupoExistente) {
-    const parentIdOrigem = subIdOrigem.split('~')[0];
     _modoVinculoAtivo.grupoIdExistente = grupoExistente.grupoId;
     _modoVinculoAtivo.selecionados = grupoExistente.membros
-      .filter(m => m.subId.split('~')[0] !== parentIdOrigem)
+      .filter(m => !_membroEhAComposicao(m, subIdOrigem, bairroOrigem))
       .map(m => {
         const subAtual = subAtualDoMembroVinculo(m);
         return subAtual ? {tipo:'composicao', subId: subAtual.subId, bairro: m.bairro} : m;
@@ -6631,7 +6639,10 @@ function construirDashboardProspeccao(){
     if (jaAgrupadas.has(l.subId)) return;
     const grupoVinc = grupoVinculoDoSubId(l.subId);
     if (grupoVinc) {
-      const membrosDoGrupo = new Set(grupoVinc.membros.map(m => m.subId));
+      const membrosDoGrupo = new Set(grupoVinc.membros.map(m => {
+        const subAtual = subAtualDoMembroVinculo(m);
+        return subAtual ? subAtual.subId : m.subId;
+      }));
       const linhasDoGrupo = linhasBrutas.filter(x => membrosDoGrupo.has(x.subId));
       linhasDoGrupo.forEach(x => jaAgrupadas.add(x.subId));
       if (!linhasDoGrupo.length) return;
