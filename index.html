@@ -2188,9 +2188,9 @@ const map = L.map('map').setView([-23.588,-46.672],13);
 // quanto o ArcGIS liberam CORS; mesmo assim há um fallback logo abaixo caso
 // algum deles pare de liberar (aí o mapa continua funcionando normalmente,
 // só a captura automática é que fica indisponível).
-const TILES_MAPA = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+const TILES_MAPA = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const TILES_SAT  = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
-const ATTR_MAPA = '© OpenStreetMap © CartoDB';
+const ATTR_MAPA = '© OpenStreetMap contributors';
 const ATTR_SAT  = '© Esri, Maxar, Earthstar Geographics';
 let TILES_COM_CORS = true;
 let basemapMapa = L.tileLayer(TILES_MAPA,{attribution:ATTR_MAPA,maxZoom:19,crossOrigin:true});
