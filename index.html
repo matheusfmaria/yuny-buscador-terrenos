@@ -2022,13 +2022,69 @@ const DISTRITOS_INICIAIS = [
   'VILA_MARIANA','SAUDE','SANTO_AMARO',
 ];
 
+// ── Cache local (IndexedDB) dos pacotes de distrito ──────────────────
+// A maior causa da demora no carregamento inicial é baixar de novo,
+// TODA vez, os ~60MB dos 24 distritos pré-carregados — mesmo quando os
+// dados não mudaram desde a última visita. Guardamos uma cópia local no
+// navegador: da segunda visita em diante, os dados aparecem quase na
+// hora (lidos do disco, sem esperar a rede), enquanto uma atualização
+// roda em segundo plano pra já deixar pronta a PRÓXIMA visita com dados
+// mais recentes, se algo tiver mudado nesse meio tempo. Falhas aqui
+// (navegador sem IndexedDB, modo anônimo restrito, etc.) nunca travam o
+// app — nesse caso ele simplesmente busca da rede como sempre fez.
+const CACHE_DB_VERSAO = 'yuny_cache_v1'; // trocar o nome invalida todo o cache antigo de uma vez
+const CACHE_STORE = 'pacotes';
+function _abrirCacheDB(){
+  return new Promise((resolve) => {
+    if (!window.indexedDB) { resolve(null); return; }
+    try {
+      const req = indexedDB.open(CACHE_DB_VERSAO, 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore(CACHE_STORE); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch(e) { resolve(null); }
+  });
+}
+const _cacheDBPromise = _abrirCacheDB();
+async function _cacheGet(chave){
+  const db = await _cacheDBPromise;
+  if (!db) return null;
+  return new Promise(resolve => {
+    try {
+      const req = db.transaction(CACHE_STORE, 'readonly').objectStore(CACHE_STORE).get(chave);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    } catch(e) { resolve(null); }
+  });
+}
+async function _cacheSet(chave, valor){
+  const db = await _cacheDBPromise;
+  if (!db) return;
+  try { db.transaction(CACHE_STORE, 'readwrite').objectStore(CACHE_STORE).put(valor, chave); }
+  catch(e) { /* cache é só otimização — falha aqui nunca deve quebrar o carregamento */ }
+}
+// Busca um pacote com cache local: se já tiver uma cópia salva, usa ela
+// IMEDIATAMENTE (sem esperar a rede) e atualiza o cache em segundo plano
+// pra próxima vez. Sem cópia salva (primeira visita, ou cache limpo),
+// busca normal da rede e já guarda pra próxima.
+async function fetchComCache(url){
+  const cacheado = await _cacheGet(url);
+  if (cacheado) {
+    fetch(url).then(r => r.ok ? r.json() : null).then(dados => { if (dados) _cacheSet(url, dados); }).catch(()=>{});
+    return cacheado;
+  }
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('HTTP '+resp.status);
+  const dados = await resp.json();
+  _cacheSet(url, dados);
+  return dados;
+}
+
 async function carregarDistritosIniciais(){
   const alvos = DISTRITOS_DISPONIVEIS.filter(d => DISTRITOS_INICIAIS.includes(d.distrito));
   const resultados = await Promise.all(alvos.map(async info => {
     try {
-      const resp = await fetch(info.arquivo);
-      if (!resp.ok) throw new Error('HTTP '+resp.status);
-      const pacote = await resp.json();
+      const pacote = await fetchComCache(info.arquivo);
       mesclarPacoteDistrito(pacote);
       regioesCarregadas.add(info.distrito);
       return true;
@@ -2051,9 +2107,7 @@ async function carregarDistrito(nomeDistrito){
   mostrarToast(`Carregando ${info.bairro}…`);
 
   try {
-    const resp = await fetch(info.arquivo);
-    if (!resp.ok) throw new Error('HTTP '+resp.status);
-    const pacote = await resp.json();
+    const pacote = await fetchComCache(info.arquivo);
     const nQuadras = mesclarPacoteDistrito(pacote);
 
     // invalida caches que dependiam do conjunto de dados anterior
@@ -2182,7 +2236,12 @@ const ZONA_LABEL={ZEU:'ZEU — Zona Eixo Urbano',ZEUa:'ZEUa',ZEUP:'ZEUP — Eixo
   ZEM:'ZEM — Zona Eixo de Metrô',ZC:'ZC — Zona Central',
   'ZCOR-1':'ZCOR-1 — Corredores',ZM:'ZM — Zona Mista',ZMa:'ZMa',};
 
-const map = L.map('map').setView([-23.588,-46.672],13);
+// preferCanvas: com milhares de composições no mapa, o renderer SVG
+// padrão do Leaflet cria um elemento de DOM (<path>) por polígono — o
+// verdadeiro gargalo de performance ao renderizar/re-renderizar o mapa,
+// bem maior que qualquer cálculo de dados. Canvas desenha tudo numa
+// única superfície, sem esse custo de DOM por forma.
+const map = L.map('map', {preferCanvas: true}).setView([-23.588,-46.672],13);
 // crossOrigin:true faz o navegador pedir os tiles com CORS — sem isso o canvas
 // fica "tainted" e a captura de tela do mapa sai em branco. Tanto o CartoDB
 // quanto o ArcGIS liberam CORS; mesmo assim há um fallback logo abaixo caso
@@ -2403,7 +2462,24 @@ function _montarSubAtivo(q, qidBase, lotes, zona){
     tipo: 'ativo',
   };
 }
+// Cache de getSubGroups: o cálculo (grafo de adjacência, score, VGV) é
+// caro e a mesma composição é consultada várias vezes dentro de um único
+// ciclo de atualização (applyQFilters → renderQuadraMarkers →
+// renderQuadraList chamam getSubGroups pra CADA quadra, cada uma). Sem
+// cache, isso refazia o mesmo cálculo 2-3 vezes seguidas pra nada.
+// Invalidado explicitamente (limparCacheGetSubGroups) sempre que
+// STATUS_LOTE_CACHE muda — nunca fica desatualizado.
+let _subGroupsCache = new Map();
+function limparCacheGetSubGroups(){ _subGroupsCache.clear(); }
 function getSubGroups(q) {
+  const _chaveCache = q.bairro+'::'+q.id;
+  const _cacheado = _subGroupsCache.get(_chaveCache);
+  if (_cacheado) return _cacheado;
+  const _resultado = _calcularSubGroups(q);
+  _subGroupsCache.set(_chaveCache, _resultado);
+  return _resultado;
+}
+function _calcularSubGroups(q) {
   const qidBase = q.id.split('-')[0];
   const efetivos = getEffectiveLotes(q);
   const edges = GRUPOS_EDGES[q.bairro+'::'+q.id] || [];
@@ -2986,6 +3062,7 @@ async function retirarLoteDaComposicaoAtiva(sql, qidBase, bairro){
   const loteNum = sql.split('.')[2];
   const obsAtual = (STATUS_LOTE_CACHE[sql]||{}).obs || '';
   STATUS_LOTE_CACHE[sql] = { id: sql, status: 'retirado_prospeccao', obs: obsAtual };
+  limparCacheGetSubGroups();
   if (_fbAtivo) { try { await _fbDb.ref('lotes_status/'+sqlToFbKey(sql)).set({status:'retirado_prospeccao', obs: obsAtual}); } catch(e){ console.warn(e); } }
 
   await migrarProspeccaoAposExclusao(qidBase, bairro, [loteNum],
@@ -3271,6 +3348,7 @@ async function aplicarDescarteTemporario(escopo, idPrincipal, qidBase, lotesAfet
     STATUS_LOTE_CACHE[sql] = { id: sql, status: 'descarte', obs: obsAtual };
     if (_fbAtivo) { try { await _fbDb.ref('lotes_status/'+sqlToFbKey(sql)).set({status:'descarte', obs: obsAtual}); } catch(e){ console.warn(e); } }
   }
+  limparCacheGetSubGroups();
   if (_fbAtivo) { try { await _fbDb.ref('descarte_status/'+sqlToFbKey(idPrincipal)).set(registro); } catch(e){ console.warn(e); } }
   return registro;
 }
@@ -3287,6 +3365,7 @@ async function removerDescarteTemporario(idPrincipal){
     STATUS_LOTE_CACHE[sql] = { id: sql, status: null, obs: obsAtual };
     if (_fbAtivo) { try { await _fbDb.ref('lotes_status/'+sqlToFbKey(sql)).set({status:null, obs: obsAtual}); } catch(e){ console.warn(e); } }
   }
+  limparCacheGetSubGroups();
   if (_fbAtivo) { try { await _fbDb.ref('descarte_status/'+sqlToFbKey(idPrincipal)).remove(); } catch(e){ console.warn(e); } }
   return registro;
 }
@@ -3619,6 +3698,7 @@ function iniciarSincronizacaoLotes() {
           novo[sql] = { id: sql, status: v.status||null, obs: v.obs||'' };
         });
         STATUS_LOTE_CACHE = novo;
+        limparCacheGetSubGroups();
         atualizarIndicadorSync('ok');
         if (primeira) { primeira=false; resolve(); }
         else {
@@ -3686,6 +3766,7 @@ async function marcarStatusComposicao(qidBase, lotes, status, groupId, obsNova, 
     const obs = obsNova!=null ? obsNova : ((STATUS_LOTE_CACHE[sql]||{}).obs || '');
     STATUS_LOTE_CACHE[sql] = { id: sql, status, obs };
   });
+  limparCacheGetSubGroups();
   renderQuadraMarkers();
   renderQuadraList();
   if (selectedQid === groupId) selectQuadra(groupId, selectedSubId, true);
@@ -3731,6 +3812,7 @@ async function toggleLoteStatus(sql, newStatus, groupId) {
   const status = atual === newStatus ? null : newStatus;
   const obs = (STATUS_LOTE_CACHE[sql] || {}).obs || '';
   STATUS_LOTE_CACHE[sql] = { id: sql, status, obs }; // otimista — reage na hora, sem esperar a rede
+  limparCacheGetSubGroups();
   renderQuadraMarkers();
   renderQuadraList();
   if (selectedQid === groupId) selectQuadra(groupId, selectedSubId, true);
@@ -4780,7 +4862,7 @@ function subPassaFiltrosNumericos(q, sub) {
   // ficha) — senão uma vila dividida em duas partes pequenas nunca
   // aparecia com o filtro de área mínima, mesmo somando mais que isso.
   let areaParaFiltro = sub.area, scoreParaFiltro = sub.score, vgvParaFiltro = sub.vgv;
-  const comboFiltro = statsCombinadoParaFicha(sub.subId, q, currentProfile==='compacto');
+  const comboFiltro = _statsVinculoPreCalc.get(q.bairro+'::'+sub.subId);
   if (comboFiltro) { areaParaFiltro = comboFiltro.area; scoreParaFiltro = comboFiltro.score; vgvParaFiltro = comboFiltro.vgv; }
   if (areaParaFiltro < qfilters.areaMin || areaParaFiltro > qfilters.areaMax) return false;
   if (scoreParaFiltro < qfilters.scoreMin || scoreParaFiltro > qfilters.scoreMax) return false;
@@ -4804,6 +4886,7 @@ function subPassaFiltrosNumericos(q, sub) {
   return true;
 }
 function applyQFilters() {
+  _recalcularCachesVinculo();
   const hideOU=document.getElementById('q-hide-ou')?.checked||false;
   visibleQuadras=QUADRAS.filter(q=>{
     if(qfilters.bairro!=='Todos'&&q.bairro!==qfilters.bairro) return false;
@@ -4888,12 +4971,16 @@ function grupoVinculoDoSubId(subId, bairro){
 // selecionada OU se está vinculada à composição atualmente selecionada —
 // pedido do Matheus: clicar em qualquer uma das vinculadas deve destacar
 // as duas juntas, já que a ficha também mostra os dados combinados.
+// Usa o cache pré-calculado (_recalcularCachesVinculo) — resolver o
+// vínculo do zero aqui, chamada a chamada, foi o que deixou o app muito
+// lento (essa função roda pra cada uma das milhares de composições a
+// cada render do mapa).
 function estaSelecionadoOuVinculado(subId, bairro){
   if (subId === selectedSubId && bairro === selectedBairro) return true;
   if (!selectedSubId) return false;
-  const grupo = grupoVinculoDoSubId(selectedSubId, selectedBairro);
-  if (!grupo) return false;
-  return grupo.membros.some(m => _membroEhAComposicao(m, subId, bairro));
+  const doGrupoDaSelecao = _subIdsVinculadosPreCalc.get(selectedBairro+'::'+selectedSubId);
+  if (!doGrupoDaSelecao) return false;
+  return doGrupoDaSelecao.has(bairro+'::'+subId);
 }
 
 function statsVinculo(grupoId){
@@ -4937,6 +5024,59 @@ function statsCombinadoParaFicha(subIdAtual, qAtual, isCompacto){
   const qParaVgv = {...qAtual, precoLocal: preco, precoLocalCompacto: preco, ou: membroDoPrecoMin.q.ou};
   const vgv = calcVGVForArea(qParaVgv, area);
   return {area, n, score, vgv, preco, fontePreco: membroDoPrecoMin.q.precoFonte, membros: membros.length};
+}
+
+// ── Cache de vínculo pré-calculado por render ────────────────────────
+// CRÍTICO PRA PERFORMANCE: renderQuadraMarkers/renderQuadraList chamam
+// subPassaFiltrosNumericos (e ela chamava statsCombinadoParaFicha) pra
+// CADA UMA das milhares de composições no mapa — refazendo do zero a
+// resolução de vínculo (que já envolve getSubGroups) a cada chamada,
+// mesmo pras composições que não têm vínculo nenhum. Isso multiplicava o
+// custo em várias ordens de grandeza e deixava o app extremamente lento
+// pra abrir E pra clicar em qualquer composição. Aqui calculamos os
+// stats combinados de TODAS as composições vinculadas UMA vez só (o
+// número de vínculos é pequeno, isso é rápido), guardamos num mapa, e
+// tanto o filtro quanto o destaque no mapa passam a fazer uma simples
+// consulta a esse mapa em vez de recalcular tudo de novo.
+let _statsVinculoPreCalc = new Map();   // "bairro::subId" -> stats combinados
+let _subIdsVinculadosPreCalc = new Map(); // "bairro::subId" -> Set("bairro::subId" de todo o grupo)
+function _recalcularCachesVinculo(){
+  _statsVinculoPreCalc = new Map();
+  _subIdsVinculadosPreCalc = new Map();
+  const isCompacto = currentProfile === 'compacto';
+  for (const [grupoId, dados] of Object.entries(VINCULOS_CACHE)) {
+    const membros = (dados.membros||[]).map(m => {
+      const subM = subAtualDoMembroVinculo(m);
+      if (!subM) return null;
+      const qm = QUADRAS.find(x => x.id === m.subId.split('~')[0] && x.bairro === m.bairro);
+      if (!qm) return null;
+      const preco = isCompacto ? (qm.precoLocalCompacto||VGV_PRECO[qm.bairro]||14000) : (qm.precoLocal||VGV_PRECO[qm.bairro]||14000);
+      return {sub: subM, q: qm, bairro: m.bairro, preco};
+    }).filter(Boolean);
+
+    // Destaque no mapa: TODOS os membros resolvidos (ativos ou não) se
+    // destacam juntos — não depende de terem score/VGV calculável.
+    if (membros.length > 1) {
+      const chaves = membros.map(m => m.bairro+'::'+m.sub.subId);
+      chaves.forEach(chave => _subIdsVinculadosPreCalc.set(chave, new Set(chaves)));
+    }
+
+    // Stats combinados (área/score/VGV pro filtro e pra ficha): só entre
+    // os membros ATIVOS (mesma regra de sempre).
+    const membrosAtivos = membros.filter(m => m.sub.tipo === 'ativo');
+    if (membrosAtivos.length < 2) continue;
+    const area = Math.round(membrosAtivos.reduce((s,m)=>s+m.sub.area, 0));
+    const n = membrosAtivos.reduce((s,m)=>s+m.sub.n, 0);
+    const score = Math.min(...membrosAtivos.map(m=>m.sub.score));
+    const preco = Math.min(...membrosAtivos.map(m=>m.preco));
+    const membroDoPrecoMin = membrosAtivos.find(m=>m.preco===preco);
+    membrosAtivos.forEach(m => {
+      const qParaVgv = {...m.q, precoLocal: preco, precoLocalCompacto: preco, ou: membroDoPrecoMin.q.ou};
+      const vgv = calcVGVForArea(qParaVgv, area);
+      _statsVinculoPreCalc.set(m.bairro+'::'+m.sub.subId,
+        {area, n, score, vgv, preco, fontePreco: membroDoPrecoMin.q.precoFonte, membros: membrosAtivos.length, grupoId});
+    });
+  }
 }
 async function salvarVinculo(grupoId, membros){
   VINCULOS_CACHE[grupoId] = {membros, criadoEm: new Date().toISOString()};
@@ -5120,6 +5260,7 @@ function geomToLatLngs(geom){
 }
 
 function renderQuadraMarkers() {
+  _recalcularCachesVinculo();
   layers.quadras.clearLayers(); quadraPolygons={};
   visibleQuadras.forEach(q=>{
     const subs=getSubGroups(q);
@@ -5258,6 +5399,7 @@ function abrirVilaPotencial(bairro, qidBase) {
   `;
 }
 function renderQuadraList() {
+  _recalcularCachesVinculo();
   const el=document.getElementById('quadra-list');
   const sortBy=document.getElementById('q-sort')?.value || 'area';
 
@@ -5515,9 +5657,7 @@ async function loadItbiPontosLayer(){
   itbiPontosCarregando = true;
   mostrarToast('Carregando transações de ITBI…');
   try {
-    const resp = await fetch('pacotes_extra/itbi_pontos_mapa.json');
-    if (!resp.ok) throw new Error('HTTP '+resp.status);
-    const dados = await resp.json();
+    const dados = await fetchComCache('pacotes_extra/itbi_pontos_mapa.json');
     pushSeguro(ITBI_PONTOS_MAPA, dados);
   } catch(e) {
     itbiPontosCarregando = false;
@@ -5693,6 +5833,7 @@ let currentProfile = 'alto'; // 'alto' | 'compacto'
 
 function setProfile(p) {
   currentProfile = p;
+  limparCacheGetSubGroups();
   document.getElementById('profile-alto').classList.toggle('on', p==='alto');
   document.getElementById('profile-compacto').classList.toggle('on', p==='compacto');
   // Recalcula scores e reaplica filtros/render
@@ -5887,6 +6028,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
   // MENOR preço de mercado (R$/m²) entre as composições vinculadas — não
   // a média nem o maior. VGV recalculado com esses valores combinados.
   const _combo = statsCombinadoParaFicha(_stats.subId, q, isCompactoQ);
+  _recalcularCachesVinculo();
   Object.values(quadraPolygons).forEach(layer=>{
     // usa os dados gravados no próprio layer (subId + bairro), não a chave
     // do dicionário, que agora é composta só pra evitar sobrescrita
@@ -6797,9 +6939,7 @@ function irParaComposicaoDashboard(qid, subId){
 // fator até o usuário mexer em algum filtro.
 async function carregarItbiComparaveis(){
   try {
-    const resp = await fetch('pacotes_extra/itbi_comparaveis.json');
-    if (!resp.ok) throw new Error('HTTP '+resp.status);
-    const dados = await resp.json();
+    const dados = await fetchComCache('pacotes_extra/itbi_comparaveis.json');
     pushSeguro(ITBI_COMPARAVEIS, dados);
   } catch(e) {
     console.warn('Falha ao carregar comparáveis de ITBI — avaliação preliminar e o fator de margem no score ficam indisponíveis até recarregar a página.', e);
