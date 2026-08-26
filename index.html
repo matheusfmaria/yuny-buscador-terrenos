@@ -5569,11 +5569,11 @@ function mostrarToast(msg, ms){
   document.body.appendChild(el);
   setTimeout(()=>el.remove(), ms||3500);
 }
-function abrirGeosampa(qidBase){
-  const [setor, quadra] = qidBase.split('.');
-  if (navigator.clipboard) navigator.clipboard.writeText(setor).catch(()=>{});
-  window.open('https://geosampa.prefeitura.sp.gov.br/PaginasPublicas/_SBC.aspx','_blank');
-  mostrarToast(`Setor "${setor}" copiado! No Geosampa: clique na lupa 🔍 → aba "Setor-Quadra" → cole o Setor e digite a Quadra ${quadra} → Localizar.`, 6000);
+// Novo portal do GeoSampa (2026) — abre direto nas coordenadas da
+// composição, com as camadas de quadra fiscal + zoneamento e o basemap
+// já configurados (mesmos parâmetros de sempre, só troca lat/lon/zoom).
+function abrirGeosampa(lat, lon){
+  window.open(`https://novogeosampa.prefeitura.sp.gov.br/#map=18.98/${lat}/${lon}/0&layers=103/100/100/,352/100/100/&basemap=4/100/100`, '_blank');
 }
 function abrirGoogleMaps(lat, lon){
   window.open(`https://www.google.com/maps/search/?api=1&query=${lat},${lon}`, '_blank');
@@ -5581,8 +5581,13 @@ function abrirGoogleMaps(lat, lon){
 // Vista de cima (bird's eye, tilt=0) centralizada no ponto — 300m de
 // distância de câmera dá um bom nível de detalhe pra conferir uma
 // composição/lote sem precisar ajustar zoom manualmente depois de abrir.
+// O sufixo "/data=..." (extraído de um link de referência do Matheus) abre
+// direto no painel de Imagens históricas, na mais recente, com "Tudo"
+// selecionado nas definições do mapa base — é um blob de estado da
+// interface do Google Earth, separado das coordenadas (que ficam antes
+// do "/data="), então reaproveitamos o mesmo sufixo pra qualquer local.
 function abrirGoogleEarth(lat, lon){
-  window.open(`https://earth.google.com/web/@${lat},${lon},0a,300d,35y,0h,0t,0r`, '_blank');
+  window.open(`https://earth.google.com/web/@${lat},${lon},0a,300d,35y,0h,0t,0r/data=CgwqBggBEgAYAUICCAE6AwoBMEICCABKDQj___________8BEAA`, '_blank');
 }
 
 // ── IMAGEM DA COMPOSIÇÃO PRA E-MAIL DE PROSPECÇÃO ────────────────────────
@@ -5948,6 +5953,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     <div class="actions" style="padding-bottom:0">
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
+      <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
       <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
@@ -5990,6 +5996,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     <div class="actions" style="padding-bottom:0">
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
+      <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
       <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
