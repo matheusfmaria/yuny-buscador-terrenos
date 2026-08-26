@@ -646,7 +646,6 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <select id="fonte-satelite-select" onchange="trocarFonteSatelite(this.value)" style="border:none;background:transparent;font-size:11.5px;color:#333;cursor:pointer">
         <option value="esri">🛰 Esri (padrão)</option>
         <option value="geosampa">🏙️ GeoSampa (10cm, oficial)</option>
-        <option value="mapbox">🌎 Mapbox (30cm, atualizado)</option>
       </select>
     </div>
 
@@ -2237,25 +2236,16 @@ function criarCamadaGeoSampa() {
     crossOrigin: false, // servidor da prefeitura pode não ter CORS habilitado
   });
 }
-// Mapbox Satellite: mosaico Maxar Vivid de 30cm, atualizado com frequência
-// (a atualização mais recente é de jan/2026) — token público do Matheus,
-// restrito por domínio nas configurações da conta dele no Mapbox.
-const MAPBOX_TOKEN = 'pk.eyJ1IjoibWF0aGV1c2ZtYXJpYSIsImEiOiJjbXQ5MGY3anMwMTEwMndwamZ4N2hsaGJqIn0.uDMuinLppkl0TGFuQOgRDw';
-function criarCamadaMapbox() {
-  return L.tileLayer(`https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}{r}.jpg90?access_token=${MAPBOX_TOKEN}`, {
-    attribution: '© Mapbox © Maxar',
-    maxZoom: 21,
-    maxNativeZoom: 19,
-    tileSize: 256,
-    detectRetina: true, // usa @2x automaticamente em telas retina — mais nítido
-    crossOrigin: false,
-  });
-}
+// Mapbox Satellite (30cm, Maxar Vivid) foi tentado mas removido por ora —
+// o token com access_token= na URL fica bloqueado pela política de
+// segurança corporativa da conta Google da Yuny (ERR_BLOCKED_BY_CLIENT,
+// confirmado em computador e celular, mesma causa: é a conta, não o
+// aparelho). Se decidirem retomar depois de resolver isso com o TI, o
+// código ficou registrado no histórico do projeto.
 function trocarFonteSatelite(fonte) {
   const estavaVisivel = map.hasLayer(basemapSatelite);
   if (estavaVisivel) map.removeLayer(basemapSatelite);
   if (fonte === 'geosampa') basemapSatelite = criarCamadaGeoSampa();
-  else if (fonte === 'mapbox') basemapSatelite = criarCamadaMapbox();
   else basemapSatelite = L.tileLayer(TILES_SAT_ATUAL, {attribution: ATTR_SAT, maxZoom: 19, crossOrigin: TILES_COM_CORS});
   basemapSatelite.on('tileerror', _onTileError);
   if (estavaVisivel) basemapSatelite.addTo(map);
@@ -5580,6 +5570,12 @@ function abrirGeosampa(qidBase){
 function abrirGoogleMaps(lat, lon){
   window.open(`https://www.google.com/maps/search/?api=1&query=${lat},${lon}`, '_blank');
 }
+// Vista de cima (bird's eye, tilt=0) centralizada no ponto — 300m de
+// distância de câmera dá um bom nível de detalhe pra conferir uma
+// composição/lote sem precisar ajustar zoom manualmente depois de abrir.
+function abrirGoogleEarth(lat, lon){
+  window.open(`https://earth.google.com/web/@${lat},${lon},0a,300d,35y,0h,0t,0r`, '_blank');
+}
 
 // ── IMAGEM DA COMPOSIÇÃO PRA E-MAIL DE PROSPECÇÃO ────────────────────────
 // (Removidos: o gerador de imagem desenhada em canvas e a busca de ruas via
@@ -5943,6 +5939,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     ${htmlAvisoDescarteAtivo(q.id)}
     <div class="actions" style="padding-bottom:0">
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
+      <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
       <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
@@ -5984,6 +5981,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     ${htmlAvisoDescarteAtivo(q.id)}
     <div class="actions" style="padding-bottom:0">
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
+      <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
       <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
