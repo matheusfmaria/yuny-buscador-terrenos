@@ -10,6 +10,12 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+<!-- MapLibre GL JS + ponte com Leaflet — usados só pro mapa base "limpo"
+     (OpenFreeMap Positron), que serve tiles vetoriais, não imagem pronta
+     como os outros basemaps (Esri/OSM/GeoSampa). -->
+<link href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.9.0/maplibre-gl.css" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.9.0/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
@@ -647,6 +653,18 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <select id="fonte-satelite-select" onchange="trocarFonteSatelite(this.value)" style="border:none;background:transparent;font-size:11.5px;color:#333;cursor:pointer">
         <option value="esri">🛰 Esri (padrão)</option>
         <option value="geosampa">🏙️ GeoSampa (10cm, oficial)</option>
+      </select>
+    </div>
+    <!-- Fonte alternativa de mapa base (não-satélite) — OpenFreeMap
+         Positron é o mesmo estilo "limpo" cinza-claro que já usávamos via
+         CartoDB antes deles passarem a exigir chave de API. Gratuito, sem
+         chave, sem limite (mantido por doações). Serve tiles vetoriais
+         (MapLibre), não imagem pronta como os outros basemaps — por isso
+         usa uma biblioteca à parte (MapLibre GL JS) só pra essa opção. -->
+    <div id="fonte-mapa-ctrl" style="display:none;position:absolute;top:46px;right:10px;z-index:1000;background:#fff;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.3);padding:5px 8px;font-size:11.5px">
+      <select id="fonte-mapa-select" onchange="trocarFonteMapa(this.value)" style="border:none;background:transparent;font-size:11.5px;color:#333;cursor:pointer">
+        <option value="osm">🗺️ OpenStreetMap (padrão)</option>
+        <option value="openfreemap">✨ OpenFreeMap (limpo)</option>
       </select>
     </div>
 
@@ -2310,19 +2328,55 @@ function trocarFonteSatelite(fonte) {
   basemapSatelite.on('tileerror', _onTileError);
   if (estavaVisivel) basemapSatelite.addTo(map);
 }
+// Mapa base "limpo" (OpenFreeMap Positron) — mesmo estilo visual cinza-
+// claro que a CartoDB oferecia antes deles passarem a exigir chave de
+// API. Gratuito, sem cadastro, sem limite de uso (mantido por doações).
+// Serve tiles VETORIAIS (MapLibre), diferente dos outros basemaps que são
+// imagem PNG pronta — por isso usa uma biblioteca à parte (MapLibre GL
+// JS + o plugin de ponte com o Leaflet, carregados no <head>) só pra essa
+// opção específica. Não participa do fallback de CORS/tileerror dos
+// outros basemaps — é um pipeline de renderização diferente (WebGL via
+// Canvas), não dispara o mesmo evento 'tileerror'.
+function criarCamadaOpenFreeMap() {
+  return L.maplibreGL({
+    style: 'https://tiles.openfreemap.org/styles/positron',
+    attribution: '© OpenFreeMap © OpenMapTiles © OpenStreetMap contributors',
+  });
+}
+function trocarFonteMapa(fonte) {
+  const estavaVisivel = map.hasLayer(basemapMapa);
+  if (estavaVisivel) map.removeLayer(basemapMapa);
+  if (fonte === 'openfreemap' && typeof L.maplibreGL !== 'function') {
+    // A biblioteca MapLibre não carregou (rede lenta, bloqueio de
+    // conexão, etc.) — volta pro OpenStreetMap em vez de quebrar o mapa.
+    mostrarToast('Não consegui carregar o mapa "limpo" (OpenFreeMap) — verifique sua conexão. Voltando pro OpenStreetMap padrão.', 7000);
+    document.getElementById('fonte-mapa-select').value = 'osm';
+    fonte = 'osm';
+  }
+  if (fonte === 'openfreemap') {
+    basemapMapa = criarCamadaOpenFreeMap();
+  } else {
+    basemapMapa = L.tileLayer(TILES_MAPA, {attribution: ATTR_MAPA, maxZoom: 19, crossOrigin: TILES_COM_CORS});
+    basemapMapa.on('tileerror', _onTileError);
+  }
+  if (estavaVisivel) basemapMapa.addTo(map);
+}
 function setBasemap(qual){
   _sincronizarBotoesCaptura(qual);
   const ctrlFonteSatelite = document.getElementById('fonte-satelite-ctrl');
+  const ctrlFonteMapa = document.getElementById('fonte-mapa-ctrl');
   if (qual==='satelite') {
     if (map.hasLayer(basemapMapa)) map.removeLayer(basemapMapa); basemapSatelite.addTo(map);
     document.getElementById('bm-satelite').style.background='#2e7d32'; document.getElementById('bm-satelite').style.color='#fff'; document.getElementById('bm-satelite').style.fontWeight='600';
     document.getElementById('bm-mapa').style.background='#fff'; document.getElementById('bm-mapa').style.color='#333'; document.getElementById('bm-mapa').style.fontWeight='400';
     if (ctrlFonteSatelite) ctrlFonteSatelite.style.display='block';
+    if (ctrlFonteMapa) ctrlFonteMapa.style.display='none';
   } else {
     if (map.hasLayer(basemapSatelite)) map.removeLayer(basemapSatelite); basemapMapa.addTo(map);
     document.getElementById('bm-mapa').style.background='#2e7d32'; document.getElementById('bm-mapa').style.color='#fff'; document.getElementById('bm-mapa').style.fontWeight='600';
     document.getElementById('bm-satelite').style.background='#fff'; document.getElementById('bm-satelite').style.color='#333'; document.getElementById('bm-satelite').style.fontWeight='400';
     if (ctrlFonteSatelite) ctrlFonteSatelite.style.display='none';
+    if (ctrlFonteMapa) ctrlFonteMapa.style.display='block';
   }
 }
 
