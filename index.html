@@ -509,6 +509,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       📊 Prospecções<span id="dash-badge-count"></span>
     </button>
     <button class="btn btn-green" onclick="exportVisible()">⬇ Exportar</button>
+    <button class="btn" onclick="exportarParaConsultaProprietarios()" title="Gera um .txt com o código de todos os lotes das composições que passam pelos filtros atuais, pronto pra usar com o script de consulta de proprietários">👤 Exportar p/ consulta de donos</button>
   </div>
 </div>
 
@@ -6489,6 +6490,56 @@ function exportVisible() {
   const a=document.createElement('a');
   a.href='data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv);
   a.download='yuny_terrenos.csv'; a.click();
+}
+// Gera um .txt com o código do contribuinte (com dígito) de TODOS os
+// lotes de TODAS as composições que passam pelos filtros atuais de
+// COMPOSIÇÃO (visibleQuadras + qfilters — o modo usado no dia a dia,
+// diferente do modo "lote" que alimenta o botão "Exportar" de cima).
+// Formato de saída: um SQL-com-dígito por linha, pronto pra colar direto
+// no consultar_proprietarios.py.
+function exportarParaConsultaProprietarios(){
+  const sqls = new Set();
+  let semDigito = 0;
+  visibleQuadras.forEach(q => {
+    const qidBase = q.id.split('-')[0];
+    getSubGroups(q).filter(s => s.tipo === 'ativo').forEach(sub => {
+      if (!subPassaFiltrosNumericos(q, sub)) return;
+      sub.lotes.forEach(l => {
+        const sql = `${qidBase}.${l}`;
+        const digito = DIGITO_SQL[sql];
+        if (digito) sqls.add(`${sql}-${digito}`);
+        else semDigito++;
+      });
+    });
+  });
+
+  if (!sqls.size) {
+    mostrarToast('Nenhum lote com dígito conhecido entre as composições que passam pelos filtros atuais.', 6000);
+    return;
+  }
+
+  const linhas = Array.from(sqls).sort();
+  const cabecalho =
+`# Gerado pelo Buscador de terrenos em ${new Date().toLocaleString('pt-BR')}
+# ${linhas.length} lote(s) — composições que passam pelos filtros atuais do mapa
+# Use com: python consultar_proprietarios.py lotes_para_consulta_proprietarios.txt
+`;
+  const conteudo = cabecalho + linhas.join('\n') + '\n';
+  const a = document.createElement('a');
+  a.href = 'data:text/plain;charset=utf-8,' + encodeURIComponent(conteudo);
+  a.download = 'lotes_para_consulta_proprietarios.txt';
+  a.click();
+
+  const minutos = Math.ceil(linhas.length * 3 / 60);
+  const avisoVolume = linhas.length > 300
+    ? ` ⚠️ Volume grande — o script demoraria ~${minutos} min pra consultar todos (3s por lote). Considere estreitar os filtros do mapa antes, se quiser algo mais rápido.`
+    : ` No script, isso leva ~${minutos} min.`;
+  mostrarToast(
+    `${linhas.length.toLocaleString('pt-BR')} lote(s) exportado(s)` +
+    (semDigito ? ` (${semDigito.toLocaleString('pt-BR')} sem dígito conhecido, ignorados)` : '') +
+    `.${avisoVolume}`,
+    9000
+  );
 }
 
 // Mobile: mostra/oculta detalhe
