@@ -3880,6 +3880,17 @@ async function abrirModalProspeccao(qid, subId){
 
   _prospeccaoAtual = {q, sub, imagem: null};
 
+  // Composições vinculadas: o e-mail de prospecção passa a refletir o
+  // BLOCO inteiro — área total somada e todos os lotes de todas as
+  // composições vinculadas, não só a que foi clicada.
+  const comboPresp = statsCombinadoParaFicha(sub.subId, q, currentProfile==='compacto');
+  const areaTotalPresp = comboPresp ? comboPresp.area : sub.area;
+  const nTotalPresp = comboPresp ? comboPresp.n : sub.n;
+  const gruposLotesPresp = comboPresp ? comboPresp.gruposLotes : [{qidBase: qid.split('-')[0], bairro: q.bairro, lotes: sub.lotes}];
+  const textoLotesPresp = gruposLotesPresp.length > 1
+    ? gruposLotesPresp.map(g => `Quadra ${formatarQidExibicao(g.qidBase)}: ${g.lotes.join(', ')}`).join('\n  ')
+    : sub.lotes.join(', ');
+
   // Pergunta "enviar tudo ou retirar lote(s) antes": sempre reaparece do
   // zero (estado inicial: pergunta visível, checklist escondida) — tanto
   // na primeira abertura quanto quando reabrimos depois de recalcular.
@@ -3891,9 +3902,9 @@ async function abrirModalProspeccao(qid, subId){
   // A imagem do e-mail agora vem exclusivamente da captura de tela do mapa
   // (botão "Capturar imagem do mapa"), então o formulário começa sem imagem.
   aplicarImagemNoFormulario(null);
-  document.getElementById('presp-sub').textContent = `${q.bairro} · ${sub.n} lote(s) · ${sub.area.toLocaleString('pt-BR')} m²`;
-  document.getElementById('presp-quadra').value = q.id;
-  document.getElementById('presp-lotes').value = sub.lotes.join(', ');
+  document.getElementById('presp-sub').textContent = `${q.bairro} · ${nTotalPresp} lote(s) · ${areaTotalPresp.toLocaleString('pt-BR')} m²${comboPresp?' (combinado c/ vínculo)':''}`;
+  document.getElementById('presp-quadra').value = formatarQidExibicao(q.id);
+  document.getElementById('presp-lotes').value = textoLotesPresp.replace(/\n\s*/g, ' | ');
   document.getElementById('presp-corretor-nome').value = '';
   document.getElementById('presp-corretor-email').value = '';
   document.getElementById('presp-endereco').value = 'Buscando endereço de referência...';
@@ -3903,10 +3914,10 @@ async function abrirModalProspeccao(qid, subId){
 
 Poderiam, por gentileza, levantar essa área junto aos proprietários? Segue o resumo da composição:
 
-• Quadra fiscal: ${q.id}
+• Quadra fiscal: ${formatarQidExibicao(q.id)}
 • Bairro: ${q.bairro}
-• Lotes: ${sub.lotes.join(', ')}
-• Área total: ${sub.area.toLocaleString('pt-BR')} m²${endereco?`
+• Lotes: ${textoLotesPresp}
+• Área total: ${areaTotalPresp.toLocaleString('pt-BR')} m²${endereco?`
 • Endereço de referência: ${endereco}`:''}
 • Ver no Google Maps: ${linkMaps}
 
@@ -4629,7 +4640,7 @@ async function enviarProspeccao(){
   // Sem "body" no link: o mailto: só sabe escrever texto puro, então deixamos
   // o corpo vazio de propósito — o conteúdo formatado (+ imagem) já está na
   // área de transferência, pronto pra colar com Ctrl+V.
-  const assunto = `Prospecção ativa — Quadra ${q.id}`;
+  const assunto = `Prospecção ativa — Quadra ${formatarQidExibicao(q.id)}`;
   const link = `mailto:${encodeURIComponent(email)}?cc=${encodeURIComponent('novosnegocios@yuny.com.br')}&subject=${encodeURIComponent(assunto)}`;
   window.location.href = link;
 
@@ -4653,9 +4664,38 @@ async function enviarProspeccao(){
 
   statusEl.style.color = copiou ? '#2e7d32' : '#c62828';
   statusEl.textContent = copiou
-    ? `Outlook aberto! Cole (Ctrl+V) no corpo do e-mail — o texto${imagem?' e a imagem já vêm':' já vem'} formatado.`
+    ? `Outlook aberto! Cole (Ctrl+V) no corpo do e-mail — o texto${imagem?' e a imagem já vêm':' já vem'} formatado. Quando terminar, clique em "✓ Concluído".`
     : 'Outlook aberto! Não consegui copiar automaticamente — use o botão "📋 Copiar conteúdo" abaixo antes de colar.';
   btn.disabled = false;
+}
+// Marca a composição como "em prospecção" e fecha o modal — independente
+// de o e-mail ter sido de fato aberto/enviado pelo Outlook. Pedido do
+// Matheus: hoje o fluxo é "Abrir no Outlook" + "Cancelar" manualmente;
+// esse botão junta as duas coisas numa etapa só, sem depender do Outlook
+// ter aberto direito.
+async function concluirProspeccao(){
+  const nome = document.getElementById('presp-corretor-nome').value.trim();
+  const email = document.getElementById('presp-corretor-email').value.trim();
+  const corpo = document.getElementById('presp-corpo').value.trim();
+  const statusEl = document.getElementById('presp-status');
+  if (!nome || !email) { statusEl.textContent = 'Preencha o nome e o e-mail do corretor.'; statusEl.style.color='#c62828'; return; }
+
+  const {q, sub} = _prospeccaoAtual;
+  await salvarCorretor(nome, email);
+  await salvarHistoricoProspeccao({
+    quadra: q.id, bairro: q.bairro, lotes: sub.lotes, area: sub.area,
+    corretor: nome, email, corpo, data: new Date().toISOString(),
+  });
+  const dataEnvioISO = new Date().toISOString();
+  await marcarProspeccaoAtiva(sub.subId, {
+    subId: sub.subId, qid: q.id, bairro: q.bairro, lotes: sub.lotes, area: sub.area,
+    corretor: nome, email, dataEnvio: dataEnvioISO,
+  });
+  await adicionarHistoricoComposicao(sub.subId, `Enviado ao ${nome} para prospecção`, null);
+  renderQuadraMarkers(); renderQuadraList();
+  if (selectedQid===q.id) selectQuadra(q.id, sub.subId);
+  fecharModalProspeccao();
+  mostrarToast('Composição marcada como em prospecção.');
 }
 
 // ── LOTES INDIVIDUAIS NO MAPA (exibidos ao abrir ficha de composição) ─
@@ -5003,6 +5043,76 @@ function statsVinculo(grupoId){
 // se algum membro não for encontrado (bairro/distrito não carregado
 // ainda, por ex.), simplesmente não combina e a ficha mostra só os dados
 // desta composição, como sempre foi.
+// União geométrica de lotes que podem vir de VÁRIAS quadras fiscais
+// diferentes (composições vinculadas) — mesma lógica de unionLotesPolygon,
+// generalizada pra receber uma lista de {qidBase, lotes}.
+// Reduz qualquer subId (com sufixo -b/-c e/ou ~N) pro formato oficial
+// "SSS.QQQ" (setor.quadra) — o que existe de verdade no cadastro da
+// prefeitura; os sufixos são só organização interna do app.
+function formatarQidExibicao(subId){
+  return subId.split('~')[0].split('-')[0];
+}
+function unionLotesMultiQuadra(gruposLotes){
+  const feats = [];
+  gruposLotes.forEach(({qidBase, lotes}) => {
+    lotes.forEach(l => {
+      const ring = LOTES_GEOM[`${qidBase}.${l}`];
+      if (!ring || ring.length < 3) return;
+      const coords = ring.slice();
+      const first = coords[0], last = coords[coords.length-1];
+      if (first[0]!==last[0] || first[1]!==last[1]) coords.push(first);
+      try { feats.push(turf.polygon([coords])); } catch(e) { /* geometria inválida, ignora este lote */ }
+    });
+  });
+  if (!feats.length) return null;
+  let unioned = feats[0];
+  for (let i=1;i<feats.length;i++){
+    try { unioned = turf.union(unioned, feats[i]); }
+    catch(e) { /* falha pontual de união — mantém o que já tinha unido */ }
+  }
+  return unioned;
+}
+// Regularidade do contorno (0-1, quanto mais perto de 1 mais regular) —
+// razão entre a área real e a área do fecho convexo (o "polígono mínimo
+// que agrega todas as áreas", como pedido). Um terreno retangular ocupa
+// quase todo o fecho convexo (perto de 1); um formato em L ou recortado
+// ocupa bem menos.
+function formatoDeUniao(uniao){
+  if (!uniao) return 0.5;
+  try {
+    const hull = turf.convex(uniao);
+    if (!hull) return 0.5;
+    const areaReal = turf.area(uniao);
+    const areaHull = turf.area(hull);
+    if (!areaHull) return 0.5;
+    return Math.max(0, Math.min(1, areaReal / areaHull));
+  } catch(e) { return 0.5; }
+}
+// Generalização de aproveitamentoSub pra lotes vindos de VÁRIAS quadras
+// fiscais (composições vinculadas) — soma área construída/terreno de
+// todos os grupos antes de calcular o CA.
+function aproveitamentoMultiQuadra(qz, gruposLotes){
+  let construida = 0, terreno = 0, semDado = 0, vagos = 0, condominio = 0;
+  gruposLotes.forEach(({qidBase, lotes}) => {
+    lotes.forEach(l => {
+      const sql = `${qidBase}.${l}`;
+      const areaLote = LOTES_AREA[sql] || 0;
+      terreno += areaLote;
+      const d = dadosIptu(sql);
+      if (!d) { semDado++; return; }
+      construida += d.areaConstruida;
+      if (d.vago) vagos++;
+      if (d.condominio) condominio++;
+    });
+  });
+  const caMax = CA_ZONA[qz.zona] || 1.5;
+  const ca = terreno > 0 ? construida / terreno : 0;
+  return {
+    construida, terreno, semDado, vagos, condominio, caMax, ca,
+    pctCaMax: caMax > 0 ? (ca / caMax) * 100 : 0,
+    remanescente: Math.max(0, terreno * caMax - construida),
+  };
+}
 function statsCombinadoParaFicha(subIdAtual, qAtual, isCompacto){
   const grupo = grupoVinculoDoSubId(subIdAtual);
   if (!grupo) return null;
@@ -5023,7 +5133,13 @@ function statsCombinadoParaFicha(subIdAtual, qAtual, isCompacto){
   const membroDoPrecoMin = membros.find(m=>m.preco===preco);
   const qParaVgv = {...qAtual, precoLocal: preco, precoLocalCompacto: preco, ou: membroDoPrecoMin.q.ou};
   const vgv = calcVGVForArea(qParaVgv, area);
-  return {area, n, score, vgv, preco, fontePreco: membroDoPrecoMin.q.precoFonte, membros: membros.length};
+  // Lotes de cada membro, agrupados por quadra fiscal (pra "CA já
+  // utilizado", pro formato do contorno e pra listar tudo no e-mail de
+  // prospecção) — cada composição vinculada carrega seu próprio qidBase.
+  const gruposLotes = membros.map(m => ({qidBase: m.q.id.split('-')[0], bairro: m.q.bairro, lotes: m.sub.lotes}));
+  const uniaoGeom = unionLotesMultiQuadra(gruposLotes);
+  const formato = formatoDeUniao(uniaoGeom);
+  return {area, n, score, vgv, preco, fontePreco: membroDoPrecoMin.q.precoFonte, membros: membros.length, formato, gruposLotes};
 }
 
 // ── Cache de vínculo pré-calculado por render ────────────────────────
@@ -5070,11 +5186,14 @@ function _recalcularCachesVinculo(){
     const score = Math.min(...membrosAtivos.map(m=>m.sub.score));
     const preco = Math.min(...membrosAtivos.map(m=>m.preco));
     const membroDoPrecoMin = membrosAtivos.find(m=>m.preco===preco);
+    const gruposLotes = membrosAtivos.map(m => ({qidBase: m.q.id.split('-')[0], bairro: m.bairro, lotes: m.sub.lotes}));
+    const uniaoGeom = unionLotesMultiQuadra(gruposLotes);
+    const formato = formatoDeUniao(uniaoGeom);
     membrosAtivos.forEach(m => {
       const qParaVgv = {...m.q, precoLocal: preco, precoLocalCompacto: preco, ou: membroDoPrecoMin.q.ou};
       const vgv = calcVGVForArea(qParaVgv, area);
       _statsVinculoPreCalc.set(m.bairro+'::'+m.sub.subId,
-        {area, n, score, vgv, preco, fontePreco: membroDoPrecoMin.q.precoFonte, membros: membrosAtivos.length, grupoId});
+        {area, n, score, vgv, preco, fontePreco: membroDoPrecoMin.q.precoFonte, membros: membrosAtivos.length, grupoId, formato, gruposLotes});
     });
   }
 }
@@ -6088,7 +6207,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     document.getElementById('detail').innerHTML = `
     <div class="detail-close" onclick="closeDetail()">✕ Fechar</div>
     <div class="dp-hd">
-      <div class="dp-sql">Quadra ${_stats.subId} <span style="font-size:10px;background:${corBadgeHd};color:#fff;border-radius:3px;padding:1px 6px">${labelRestricao}</span></div>
+      <div class="dp-sql">Quadra ${formatarQidExibicao(_stats.subId)} <span style="font-size:10px;background:${corBadgeHd};color:#fff;border-radius:3px;padding:1px 6px">${labelRestricao}</span></div>
       <div class="dp-sub">${q.bairro} ${zonePill(q.zona)}</div>
     </div>
     ${htmlAvisoDescarteAtivo(q.id)}
@@ -6131,7 +6250,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
   document.getElementById('detail').innerHTML=`
     <div class="detail-close" onclick="closeDetail()">✕ Fechar</div>
     <div class="dp-hd">
-      <div class="dp-sql">Quadra ${_stats.subId}${_stats.dividido?` <span style="font-size:10px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 6px">parte ${_stats.subId.split('~')[1]}</span>`:''}</div>
+      <div class="dp-sql">Quadra ${formatarQidExibicao(_stats.subId)}${_stats.dividido?` <span style="font-size:10px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 6px">parte ${_stats.subId.split('~')[1]}</span>`:''}</div>
       <div class="dp-sub">${q.bairro} ${zonePill(qz.zona)}</div>
     </div>
     ${htmlAvisoDescarteAtivo(q.id)}
@@ -6170,8 +6289,8 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <div class="dp-r"><span class="dp-rl">Bairro</span><span class="dp-rv">${q.bairro}</span></div>
       <div class="dp-r"><span class="dp-rl">Zoneamento${qz!==q?' (desta parte)':''}</span><span class="dp-rv">${zonePill(qz.zona)}</span></div>
       ${qz!==q ? `<div style="font-size:10px;color:#aaa;margin:-2px 0 6px">Quadra inteira tem zoneamento misto — esta parte foi separada por ter zona diferente do restante.</div>` : ''}
-      <div class="dp-r"><span class="dp-rl">Lotes contíguos${_stats.dividido?' (desta parte)':''}</span><span class="dp-rv">${_stats.n}${_stats.dividido?` (de ${q.n} originais)`:''}</span></div>
-      <div class="dp-r"><span class="dp-rl">Área média por lote contíguo</span><span class="dp-rv">${Math.round(_stats.area/_stats.n).toLocaleString('pt-BR')} m²</span></div>
+      <div class="dp-r"><span class="dp-rl">Lotes contíguos${_stats.dividido?' (desta parte)':''}${_combo?' (combinado c/ vínculo)':''}</span><span class="dp-rv">${_combo?_combo.n:_stats.n}${_stats.dividido&&!_combo?` (de ${q.n} originais)`:''}</span></div>
+      <div class="dp-r"><span class="dp-rl">Área média por lote contíguo</span><span class="dp-rv">${Math.round((_combo?_combo.area:_stats.area)/(_combo?_combo.n:_stats.n)).toLocaleString('pt-BR')} m²</span></div>
     </div>
     ${(() => {
       const vila = getVilaPotencial(q);
@@ -6198,31 +6317,36 @@ function selectQuadra(qid, subId, manterView, bairroHint){
         </div>
       </div>` : ''}
     <div class="dp-sec">
-      <div class="dp-st">Lotes contíguos${_stats.dividido?' desta parte':' do grupo'}</div>
-      <div class="sql-list">${_stats.lotes.map(l=>'<span style="display:inline-block;background:#f0f0f0;border-radius:3px;padding:1px 6px;margin:2px;font-size:11px;font-family:monospace">SQL '+q.id.split('-')[0]+'.'+l+'</span>').join('')}</div>
+      <div class="dp-st">Lotes contíguos${_stats.dividido?' desta parte':' do grupo'}${_combo?' — combinado c/ vínculo':''}</div>
+      <div class="sql-list">${(_combo
+        ? _combo.gruposLotes.flatMap(g => g.lotes.map(l => g.qidBase+'.'+l))
+        : _stats.lotes.map(l => q.id.split('-')[0]+'.'+l)
+      ).map(sql=>'<span style="display:inline-block;background:#f0f0f0;border-radius:3px;padding:1px 6px;margin:2px;font-size:11px;font-family:monospace">SQL '+sql+'</span>').join('')}</div>
     </div>
     <div class="dp-sec">
       <div class="dp-st">Composição do score — ${_stats.score} / 100</div>
       ${(()=>{
         const isCompacto = currentProfile==='compacto';
         const zSc=ZONA_SC[qz.zona]||0;
-        const eSc=negSc(_stats.n);
+        const nParaScore = _combo ? _combo.n : _stats.n;
+        const eSc=negSc(nParaScore);
         const vgvGrupo = _stats.vgv;
         const vgSc = calcVgvScore(vgvGrupo, 20000000, 1500000000, 15);
+        const formatoParaScore = _combo ? _combo.formato : q.formato;
         let fmtSc, pSc, lqSc, lblPreco;
         if(isCompacto){
-          fmtSc = formatoScore(q.formato, 15);
+          fmtSc = formatoScore(formatoParaScore, 15);
           const preco=q.precoLocalCompacto || VGV_PRECO[q.bairro]||14000;
           pSc=janelaScore(preco,11000,15000,7000,19000,25);
           lqSc=liqScore(q.pctVendidoCompacto,20);
           lblPreco='Faixa-alvo R$11k-15k/m² (compacto)';
         } else {
-          fmtSc = formatoScore(q.formato, 10);
+          fmtSc = formatoScore(formatoParaScore, 10);
           pSc=Math.max(0,Math.min(20,Math.round(((q.precoLocal||VGV_PRECO[q.bairro]||14000)-8000)/(45000-8000)*20)));
           lqSc=liqScore(q.pctVendido,15);
           lblPreco='Valor de mercado (R$'+(q.precoLocal||VGV_PRECO[q.bairro]||14000).toLocaleString('pt-BR')+'/m²)';
         }
-        const ap = aproveitamentoSub(qz, _stats);
+        const ap = _combo ? aproveitamentoMultiQuadra(qz, _combo.gruposLotes) : aproveitamentoSub(qz, _stats);
         const penalCa = Math.round(Math.max(0, Math.min(1, ap.pctCaMax/150)) * CA_PENALIDADE_MAXPTS);
         const bonusAval = fatorAvaliacaoScore(qz, _stats.area, _stats.lotes);
         return [
@@ -6230,23 +6354,23 @@ function selectQuadra(qid, subId, manterView, bairroHint){
           scoreBar(lblPreco,pSc,isCompacto?25:20),
           scoreBar("Liquidez de mercado (% vendido na região)",lqSc,isCompacto?20:15),
           isCompacto?'':scoreBar("VGV estimado",vgSc,15),
-          scoreBar("Formato do terreno (regularidade do contorno)",fmtSc,isCompacto?15:10),
-          scoreBar("Facilidade de negociação ("+_stats.n+" lotes)",eSc,20),
+          scoreBar("Formato do terreno (regularidade do contorno)"+(_combo?' — combinado':''),fmtSc,isCompacto?15:10),
+          scoreBar("Facilidade de negociação ("+nParaScore+" lotes"+(_combo?', combinado':'')+")",eSc,20),
           scoreBar("Margem s/ mercado (avaliação × preço da região)",bonusAval,AVAL_SCORE_MAXPTS),
-          scoreBarNegativo("CA já utilizado ("+ap.pctCaMax.toFixed(0)+"% do potencial)",penalCa,CA_PENALIDADE_MAXPTS),
+          scoreBarNegativo("CA já utilizado ("+ap.pctCaMax.toFixed(0)+"% do potencial"+(_combo?', combinado':'')+")",penalCa,CA_PENALIDADE_MAXPTS),
         ].join("");
       })()}
     </div>
     ${htmlAvaliacaoPreliminar(qz, _stats)}
     ${(()=>{
-      const ap = aproveitamentoSub(qz, _stats);
+      const ap = _combo ? aproveitamentoMultiQuadra(qz, _combo.gruposLotes) : aproveitamentoSub(qz, _stats);
       const venal = venalTerrenoSub(qz, _stats);
       // faixa de cor: quanto menos construído, melhor a oportunidade
       const cor = ap.pctCaMax < 25 ? '#2e7d32' : ap.pctCaMax < 60 ? '#f9a825' : '#c62828';
       const rotulo = ap.pctCaMax < 25 ? 'subutilizado' : ap.pctCaMax < 60 ? 'parcialmente usado' : 'bem aproveitado';
       return `
     <div class="dp-sec">
-      <div class="dp-st">Aproveitamento atual (cadastro IPTU)</div>
+      <div class="dp-st">Aproveitamento atual (cadastro IPTU)${_combo?' — combinado c/ vínculo':''}</div>
       <div class="score-box" style="margin:0 0 8px;background:#fafafa">
         <div class="score-lbl">CA utilizado — ${rotulo}</div>
         <div class="score-num" style="color:${cor}">${ap.ca.toFixed(2)}<span style="font-size:13px;color:#aaa"> de ${ap.caMax.toFixed(2)} máx</span></div>
@@ -6255,7 +6379,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       </div>
       <div class="dp-r"><span class="dp-rl">Área construída hoje</span><span class="dp-rv">${Math.round(ap.construida).toLocaleString('pt-BR')} m²</span></div>
       <div class="dp-r"><span class="dp-rl">Ainda cabe construir (CA máx)</span><span class="dp-rv" style="color:${cor};font-weight:600">${Math.round(ap.remanescente).toLocaleString('pt-BR')} m²</span></div>
-      ${ap.vagos ? `<div class="dp-r"><span class="dp-rl">Lotes sem construção</span><span class="dp-rv" style="color:#2e7d32;font-weight:600">${ap.vagos} de ${_stats.n}</span></div>` : ''}
+      ${ap.vagos ? `<div class="dp-r"><span class="dp-rl">Lotes sem construção</span><span class="dp-rv" style="color:#2e7d32;font-weight:600">${ap.vagos} de ${_combo?_combo.n:_stats.n}</span></div>` : ''}
       ${(()=>{
         // uso do MAIOR lote — é o que define o caráter da área.
         // Importa porque "terreno vazio" pode ser escola, clube ou depósito,
@@ -7058,6 +7182,7 @@ iniciarAutenticacao();
       <button class="presp-btn-cancel" onclick="fecharModalProspeccao()">Cancelar</button>
       <button class="presp-btn-cancel" onclick="copiarCorpoEmailParaClipboard().then(ok=>mostrarToast(ok?'Conteúdo copiado! Cole (Ctrl+V) no corpo do e-mail.':'Não foi possível copiar.'))">📋 Copiar conteúdo</button>
       <button class="presp-btn-send" id="presp-btn-enviar" onclick="enviarProspeccao()">Abrir no Outlook</button>
+      <button class="presp-btn-send" style="background:#2e7d32" onclick="concluirProspeccao()">✓ Concluído</button>
     </div>
     <div class="presp-status" id="presp-status"></div>
   </div>
