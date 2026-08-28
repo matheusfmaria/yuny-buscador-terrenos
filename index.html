@@ -873,6 +873,12 @@ const LOTES_AREA={};
 const GEOIMOVEL_PROJETOS=[];
 const ITBI_PONTOS_MAPA=[];
 const ITBI_COMPARAVEIS=[];
+// Nomes de proprietários (gerados pelo script consultar_proprietarios.py,
+// consulta pública no site da prefeitura — dado aberto, sem sigilo fiscal
+// por decreto). Chave: SQL sem dígito ("022.013.0140"), valor: nome. Vem
+// de pacotes_extra/proprietarios.json, atualizado manualmente conforme
+// novas rodadas de consulta são feitas.
+let PROPRIETARIOS = {};
 const Q14_LOTE={};
 const AVAL_COEF={"sem_area":{"elast_ref":0.6935,"elast_area":0.0,"efeito_zona":{"Praça/Canteiro":0.0,"ZC":0.0165,"ZC-ZEIS":-0.0786,"ZCOR-1":-0.1272,"ZCOR-2":-0.0759,"ZCOR-3":-0.2514,"ZCORa":0.1394,"ZCa":0.0027,"ZDE-1":0.1257,"ZDE-2":-0.0398,"ZEIS-1":-0.0078,"ZEIS-2":-0.2298,"ZEIS-3":0.0464,"ZEIS-4":0.3407,"ZEIS-5":-0.0015,"ZEM":0.1128,"ZEMP":0.0252,"ZEP":-0.4179,"ZER-1":-0.0369,"ZER-2":-0.1396,"ZERa":-0.2852,"ZEU":0.1421,"ZEUP":0.0016,"ZEUPa":-0.0791,"ZEUa":-0.0053,"ZM":0.0336,"ZMIS":0.4165,"ZMISa":0.5874,"ZMa":0.0279,"ZPDS":-0.4019,"ZPR":0.1208},"r2":0.408,"r2_cv":0.4074,"dispersao":0.5441},"com_area":{"elast_ref":0.6704,"elast_area":-0.4109,"efeito_zona":{"Praça/Canteiro":0.0,"ZC":-0.0672,"ZC-ZEIS":-0.1794,"ZCOR-1":0.2075,"ZCOR-2":0.1703,"ZCOR-3":-0.0919,"ZCORa":0.1538,"ZCa":-0.0256,"ZDE-1":-0.0557,"ZDE-2":-0.0433,"ZEIS-1":-0.0789,"ZEIS-2":-0.0358,"ZEIS-3":-0.0727,"ZEIS-4":0.157,"ZEIS-5":-0.0369,"ZEM":0.0403,"ZEMP":-0.0455,"ZEP":-0.2315,"ZER-1":0.2361,"ZER-2":-0.0648,"ZERa":0.0259,"ZEU":0.0817,"ZEUP":-0.088,"ZEUPa":-0.0887,"ZEUa":-0.0232,"ZM":-0.0519,"ZMIS":0.1413,"ZMISa":0.3268,"ZMa":-0.0173,"ZPDS":0.1384,"ZPR":0.089},"r2":0.5124,"r2_cv":0.5119,"dispersao":0.4938},"n_calibragem":71919};
 const GRUPOS_EDGES={};
@@ -997,7 +1003,36 @@ function iniciarSincronizacaoProprietarios(){
 }
 
 function dvDoSql(sql){
-  return (typeof SQL_DV !== 'undefined' && SQL_DV[sql] !== undefined) ? SQL_DV[sql] : null;
+  return DIGITO_SQL[sql] !== undefined ? DIGITO_SQL[sql] : null;
+}
+// Duas fontes de nome de proprietário: PROPRIETARIOS_CACHE (cadastro
+// manual, sincronizado com o time via Firebase — alguém já conferiu e
+// colou o nome) e PROPRIETARIOS (carga em massa do script
+// consultar_proprietarios.py). O manual tem prioridade por ser mais
+// recente/verificado; o em massa preenche o resto.
+function nomeProprietario(sql){
+  const manual = PROPRIETARIOS_CACHE[sql];
+  if (manual && manual.nome) return manual.nome;
+  return PROPRIETARIOS[sql] || null;
+}
+// Facilidade de negociação: idealmente conta PROPRIETÁRIOS distintos, não
+// lotes — negociar 10 lotes com o mesmo dono é bem mais fácil que 10
+// lotes com 10 donos diferentes. Só usa essa contagem quando TEMOS o nome
+// de TODOS os lotes envolvidos (dado parcial enganaria pra menos); sem
+// isso, cai de volta pra contagem de lotes, como sempre foi.
+function contarNegociacao(gruposLotes){
+  const nomes = [];
+  let completo = true;
+  gruposLotes.forEach(({qidBase, lotes}) => {
+    lotes.forEach(l => {
+      const nome = nomeProprietario(`${qidBase}.${l}`);
+      if (!nome) completo = false;
+      else nomes.push(nome.trim().toUpperCase());
+    });
+  });
+  const totalLotes = gruposLotes.reduce((s,g)=>s+g.lotes.length, 0);
+  if (completo && totalLotes > 0) return { n: new Set(nomes).size, porProprietario: true };
+  return { n: totalLotes, porProprietario: false };
 }
 function sqlComDv(sql){
   const dv = dvDoSql(sql);
@@ -6518,17 +6553,39 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       </div>` : ''}
     <div class="dp-sec">
       <div class="dp-st">Lotes contíguos${_stats.dividido?' desta parte':' do grupo'}${_combo?' — combinado c/ vínculo':''}</div>
-      <div class="sql-list">${(_combo
-        ? _combo.gruposLotes.flatMap(g => g.lotes.map(l => g.qidBase+'.'+l))
-        : _stats.lotes.map(l => q.id.split('-')[0]+'.'+l)
-      ).map(sql=>'<span style="display:inline-block;background:#f0f0f0;border-radius:3px;padding:1px 6px;margin:2px;font-size:11px;font-family:monospace">SQL '+sql+'</span>').join('')}</div>
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr>
+          <th style="text-align:left;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">SQL</th>
+          <th style="text-align:left;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">Proprietário</th>
+        </tr></thead>
+        <tbody>${(_combo
+          ? _combo.gruposLotes.flatMap(g => g.lotes.map(l => g.qidBase+'.'+l))
+          : _stats.lotes.map(l => q.id.split('-')[0]+'.'+l)
+        ).map(sql => {
+          const nome = nomeProprietario(sql);
+          const safe = sql.replace(/\./g,'-');
+          return `<tr>
+            <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2;font-family:monospace;white-space:nowrap">${sqlComDigito(sql)}</td>
+            <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2">${nome
+              ? escapeHtmlHistorico(nome)
+              : `<button class="prop-btn" style="font-size:10px;padding:2px 8px" onclick="consultarProprietario('${sql}')">🔍 Consultar</button>
+                 <div class="prop-form" id="prop-form-${safe}" style="display:none;margin-top:4px">
+                   <input id="prop-input-${safe}" placeholder="Cole o nome que apareceu no formulário">
+                   <button onclick="salvarProprietario('${sql}')">Salvar</button>
+                 </div>`
+            }</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
     </div>
     <div class="dp-sec">
       <div class="dp-st">Composição do score — ${_stats.score} / 100</div>
       ${(()=>{
         const isCompacto = currentProfile==='compacto';
         const zSc=ZONA_SC[qz.zona]||0;
-        const nParaScore = _combo ? _combo.n : _stats.n;
+        const gruposParaNegociacao = _combo ? _combo.gruposLotes : [{qidBase: q.id.split('-')[0], lotes: _stats.lotes}];
+        const infoNegociacao = contarNegociacao(gruposParaNegociacao);
+        const nParaScore = infoNegociacao.n;
         const eSc=negSc(nParaScore);
         const vgvGrupo = _stats.vgv;
         const vgSc = calcVgvScore(vgvGrupo, 20000000, 1500000000, 15);
@@ -6555,7 +6612,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
           scoreBar("Liquidez de mercado (% vendido na região)",lqSc,isCompacto?20:15),
           isCompacto?'':scoreBar("VGV estimado",vgSc,15),
           scoreBar("Formato do terreno (regularidade do contorno)"+(_combo?' — combinado':''),fmtSc,isCompacto?15:10),
-          scoreBar("Facilidade de negociação ("+nParaScore+" lotes"+(_combo?', combinado':'')+")",eSc,20),
+          scoreBar("Facilidade de negociação ("+nParaScore+(infoNegociacao.porProprietario?" proprietário"+(nParaScore===1?'':'s'):" lote"+(nParaScore===1?'':'s'))+(_combo?', combinado':'')+")",eSc,20),
           scoreBar("Margem s/ mercado (avaliação × preço da região)",bonusAval,AVAL_SCORE_MAXPTS),
           scoreBarNegativo("CA já utilizado ("+ap.pctCaMax.toFixed(0)+"% do potencial"+(_combo?', combinado':'')+")",penalCa,CA_PENALIDADE_MAXPTS),
         ].join("");
@@ -7330,6 +7387,18 @@ async function carregarItbiComparaveis(){
     console.warn('Falha ao carregar comparáveis de ITBI — avaliação preliminar e o fator de margem no score ficam indisponíveis até recarregar a página.', e);
   }
 }
+// Arquivo OPCIONAL — só existe depois que a primeira rodada do script
+// consultar_proprietarios.py for feita e o proprietarios.json for
+// colocado em pacotes_extra/. Sem ele, o app funciona normalmente, só
+// sem os nomes (mostra o botão de consulta manual em todo lugar).
+async function carregarProprietarios(){
+  try {
+    const dados = await fetchComCache('pacotes_extra/proprietarios.json');
+    Object.assign(PROPRIETARIOS, dados);
+  } catch(e) {
+    console.info('proprietarios.json ainda não existe em pacotes_extra/ — nomes de proprietário ficam indisponíveis até a primeira rodada do script.');
+  }
+}
 
 function iniciarApp(){
   // Ativa camadas de composição ao iniciar
@@ -7338,7 +7407,7 @@ function iniciarApp(){
   currentTab='quadras';
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
-  Promise.all([iniciarSincronizacaoLotes(), iniciarSincronizacaoProspeccao(), iniciarSincronizacaoDescarte(), iniciarSincronizacaoFuturo(), iniciarSincronizacaoProprietarios(), iniciarSincronizacaoEmpreendimentoIgnorado(), iniciarSincronizacaoVinculos(), carregarItbiComparaveis(), carregarDistritosIniciais()]).then(async () => {
+  Promise.all([iniciarSincronizacaoLotes(), iniciarSincronizacaoProspeccao(), iniciarSincronizacaoDescarte(), iniciarSincronizacaoFuturo(), iniciarSincronizacaoProprietarios(), iniciarSincronizacaoEmpreendimentoIgnorado(), iniciarSincronizacaoVinculos(), carregarItbiComparaveis(), carregarProprietarios(), carregarDistritosIniciais()]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
     await repararProspeccoesAposUnificacao(); // corrige prospecções gravadas antes da unificação de quadras
     // Perímetros só das regiões que NÃO vieram pré-carregadas — desenhados
