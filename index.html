@@ -2990,6 +2990,35 @@ function iniciarSincronizacaoProspeccao(){
 // estável e nunca muda, então usamos ele como fallback: se o subId exato
 // não existir mais, pega a maior peça ATIVA que ainda pertence à mesma
 // quadra fiscal variante.
+// Resolve o subId ATUAL de uma prospecção salva. Mesmo problema (e mesma
+// solução) dos vínculos: o rótulo "~N" é atribuído por índice e pode
+// passar a apontar pra uma peça FISICAMENTE DIFERENTE quando a quadra se
+// divide/recompõe depois que a prospecção foi enviada — por isso o botão
+// "Ver composição" do dashboard levava pra área errada. A lista de lotes
+// gravada junto com a prospecção é o que identifica a composição de forma
+// confiável, então buscamos a peça atual que mais se sobrepõe a ela.
+function subAtualDaProspeccao(st){
+  if (!st || !st.qid) return null;
+  // O bairro é parte da identidade da quadra: existem quadras com o MESMO
+  // código em bairros diferentes. Sem ele, pegaríamos a primeira da lista
+  // e resolveríamos pra uma composição em outro lugar da cidade.
+  const q = st.bairro
+    ? QUADRAS.find(x => x.id === st.qid && x.bairro === st.bairro)
+    : QUADRAS.find(x => x.id === st.qid);
+  if (!q) return null;
+  const subs = getSubGroups(q);
+  if (st.lotes && st.lotes.length) {
+    const lotesOriginais = new Set(st.lotes);
+    let melhor = null, melhorSobreposicao = 0;
+    subs.forEach(s => {
+      const sobreposicao = s.lotes.filter(l => lotesOriginais.has(l)).length;
+      if (sobreposicao > melhorSobreposicao) { melhorSobreposicao = sobreposicao; melhor = s; }
+    });
+    if (melhor) return melhor;
+  }
+  // Sem lotes gravados (prospecções antigas): cai no subId exato, se ainda existir
+  return subs.find(s => s.subId === st.subId) || null;
+}
 function subAtualDoMembroVinculo(membro){
   const qMembro = QUADRAS.find(x => x.id === membro.subId.split('~')[0] && x.bairro === membro.bairro);
   if (!qMembro) return null;
@@ -7027,16 +7056,22 @@ function construirDashboardProspeccao(){
       const area = linhasDoGrupo.reduce((s,x)=>s+(x.area||0),0);
       const maisRecente = [...linhasDoGrupo].sort((a,b)=> new Date(b.dataEnvio)-new Date(a.dataEnvio))[0];
       const diasMin = Math.min(...linhasDoGrupo.map(x => x.dias ?? Infinity));
+      const maisRecenteResolvido = subAtualDaProspeccao(maisRecente);
       linhas.push({
         ...maisRecente,
         subId: linhasDoGrupo.map(x=>x.subId).join(' + '),
         area, dias: diasMin===Infinity ? null : diasMin,
-        _irParaQid: maisRecente.qid, _irParaSubId: maisRecente.subId,
+        _irParaQid: maisRecente.qid,
+        _irParaSubId: maisRecenteResolvido ? maisRecenteResolvido.subId : maisRecente.subId,
+        _irParaBairro: maisRecente.bairro,
         vinculado: true,
       });
     } else {
       jaAgrupadas.add(l.subId);
-      linhas.push({...l, _irParaQid: l.qid, _irParaSubId: l.subId});
+      const resolvido = subAtualDaProspeccao(l);
+      linhas.push({...l, _irParaQid: l.qid,
+        _irParaSubId: resolvido ? resolvido.subId : l.subId,
+        _irParaBairro: l.bairro});
     }
   });
   linhas.sort((a,b) => (b.dias??0) - (a.dias??0));
@@ -7117,7 +7152,7 @@ function construirDashboardProspeccao(){
       <td>${escapeHtmlHistorico(l.corretor)}</td>
       <td>${formatarDataHistorico(l.dataEnvio)}</td>
       <td>${l.dias===null?'—':`${l.dias} dia${l.dias===1?'':'s'}`} ${emAlerta?'<span class="dash-alerta-pill">⚠️ Atenção</span>':''}</td>
-      <td><button class="dash-row-btn" onclick="irParaComposicaoDashboard('${l._irParaQid}','${l._irParaSubId}')">Ver composição</button></td>
+      <td><button class="dash-row-btn" onclick='irParaComposicaoDashboard("${l._irParaQid}","${l._irParaSubId}","${(l._irParaBairro||"").replace(/"/g,"&quot;")}")'>Ver composição</button></td>
     </tr>`;
   }).join('');
 
@@ -7154,10 +7189,15 @@ function atualizarDashboardProspeccaoSeAberto(){
   badge.classList.toggle('show', totalAlerta>0);
   badge.textContent = totalAlerta;
 }
-function irParaComposicaoDashboard(qid, subId){
+// IMPORTANTE: o bairro é obrigatório pra desambiguar. Existem quadras com
+// o MESMO código em bairros diferentes (ex: 014.019 existe em Cerqueira
+// César e em Jardim Paulista; 041.280 em Vila Nova Conceição e em Moema)
+// — sem o bairro, selectQuadra pegava a primeira da lista e levava pra
+// composição errada, em outro lugar da cidade.
+function irParaComposicaoDashboard(qid, subId, bairro){
   fecharDashboardProspeccao();
   if (window.innerWidth<=768) toggleSidebarMobile(false);
-  selectQuadra(qid, subId);
+  selectQuadra(qid, subId, false, bairro);
 }
 
 // Init — só roda DEPOIS do login (chamado por _liberarApp)
