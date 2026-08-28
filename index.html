@@ -1998,6 +1998,82 @@ function marcarPerimetroCarregando(nomeDistrito, carregando){
 // Mescla o pacote de um distrito nas estruturas globais — extraído de
 // carregarDistrito() pra ser reaproveitado também no carregamento em
 // lote da abertura (DISTRITOS_INICIAIS), sem duplicar a lógica.
+// Uma quadra fiscal (SSS.QQQ) é ÚNICA na cidade — é a unidade oficial do
+// cadastro da prefeitura. Mas a base do app foi montada por bairro, e
+// quadras que ficam em cima de uma divisa de bairro acabaram entrando
+// como DUAS quadras diferentes, com o mesmo código e lotes
+// complementares (ex: 041.280 aparecia com 14 lotes em Vila Nova
+// Conceição e 1 lote em Moema — é a mesma quadra, no mesmo lugar).
+//
+// Isso causava bugs sérios: o app escolhia "a primeira que achasse" ao
+// abrir uma composição, e os registros de prospecção/restrição (gravados
+// por código de quadra) colidiam entre as duas metades.
+//
+// Aqui juntamos os pedaços de volta numa quadra só. O bairro segue
+// existindo como rótulo (o da parte com mais lotes), mas deixa de ser
+// desambiguador. Zoneamento misto não é problema: getSubGroups já separa
+// composições por zona, então uma quadra que atravessa duas zonas
+// continua virando composições distintas, como deve ser.
+function unificarQuadrasDuplicadas(){
+  const porId = new Map();
+  QUADRAS.forEach(q => {
+    if (!porId.has(q.id)) porId.set(q.id, []);
+    porId.get(q.id).push(q);
+  });
+
+  let unificadas = 0;
+  porId.forEach((partes, id) => {
+    if (partes.length < 2) return;
+    // A parte com mais lotes vira a "principal" e absorve as outras — é a
+    // que melhor representa a quadra (bairro, preço de mercado, zona
+    // predominante).
+    partes.sort((a,b) => b.lotes.length - a.lotes.length);
+    const principal = partes[0];
+    const outras = partes.slice(1);
+    const chavePrincipal = principal.bairro + '::' + id;
+
+    outras.forEach(outra => {
+      const chaveOutra = outra.bairro + '::' + id;
+      // Lotes (sem duplicar — já verificamos que são complementares)
+      const vistos = new Set(principal.lotes);
+      outra.lotes.forEach(l => { if (!vistos.has(l)) { principal.lotes.push(l); vistos.add(l); } });
+      // Arestas de adjacência: sem juntar, os lotes da parte absorvida
+      // ficariam "soltos" e virariam composições de 1 lote cada.
+      const edgesOutra = GRUPOS_EDGES[chaveOutra];
+      if (edgesOutra) {
+        GRUPOS_EDGES[chavePrincipal] = (GRUPOS_EDGES[chavePrincipal] || []).concat(edgesOutra);
+        delete GRUPOS_EDGES[chaveOutra];
+      }
+      if (GEOM_MAP[chaveOutra]) delete GEOM_MAP[chaveOutra];
+      // Área e contagem passam a refletir a quadra inteira
+      principal.area = (principal.area || 0) + (outra.area || 0);
+      principal.n = principal.lotes.length;
+    });
+
+    // O centro do mapa passa a ser o centroide de todas as partes,
+    // ponderado pelo número de lotes de cada uma.
+    const totalLotes = partes.reduce((s,p) => s + p.lotes.length, 0) || 1;
+    principal.lat = partes.reduce((s,p) => s + p.lat * p.lotes.length, 0) / totalLotes;
+    principal.lon = partes.reduce((s,p) => s + p.lon * p.lotes.length, 0) / totalLotes;
+    // GEOM_MAP guardava a união pré-calculada de uma parte só — agora
+    // está desatualizada, então é recalculada sob demanda.
+    delete GEOM_MAP[chavePrincipal];
+    unificadas += outras.length;
+  });
+
+  if (unificadas) {
+    // Remove as partes absorvidas do array principal
+    const manter = new Set();
+    porId.forEach((partes) => { manter.add(partes[0]); });
+    const filtradas = QUADRAS.filter(q => manter.has(q) || porId.get(q.id).length === 1);
+    QUADRAS.length = 0;
+    pushSeguro(QUADRAS, filtradas);
+    limparCacheGetSubGroups();
+    console.info(`${unificadas} pedaço(s) de quadra fiscal reunidos com a quadra principal (mesma SSS.QQQ separada por divisa de bairro).`);
+  }
+  return unificadas;
+}
+
 function mesclarPacoteDistrito(pacote){
   pushSeguro(GRUPOS_RAW, pacote.grupos);
   Object.assign(LOTES_GEOM, pacote.lotesGeom);
@@ -2112,6 +2188,10 @@ async function carregarDistritosIniciais(){
       return false;
     }
   }));
+  // Só depois que TODOS os distritos iniciais entraram — as duas metades
+  // de uma quadra de divisa podem vir de distritos diferentes, então
+  // unificar antes disso não juntaria nada.
+  unificarQuadrasDuplicadas();
   const falhas = resultados.filter(r => !r).length;
   if (falhas) mostrarToast(`${falhas} região(ões) inicial(is) não carregaram — clique no perímetro pra tentar de novo.`);
 }
@@ -2128,6 +2208,10 @@ async function carregarDistrito(nomeDistrito){
   try {
     const pacote = await fetchComCache(info.arquivo);
     const nQuadras = mesclarPacoteDistrito(pacote);
+    // O distrito recém-chegado pode conter a outra metade de uma quadra de
+    // divisa que já estava carregada — reunir na hora evita que ela apareça
+    // duas vezes no mapa.
+    unificarQuadrasDuplicadas();
 
     // invalida caches que dependiam do conjunto de dados anterior
     _avalScoreCache.clear();
@@ -3059,7 +3143,7 @@ async function marcarProspeccaoAtiva(subId, dados, _pulandoPropagacao){
   // juntas — enviar prospecção de uma marca todas as outras da mesma
   // negociação também, com o mesmo corretor/data.
   if (!_pulandoPropagacao) {
-    const grupo = grupoVinculoDoSubId(subId, dados.bairro);
+    const grupo = grupoVinculoDoSubId(subId);
     if (grupo) {
       for (const membro of grupo.membros) {
         const subMembro = subAtualDoMembroVinculo(membro);
@@ -3878,7 +3962,7 @@ async function marcarStatusComposicao(qidBase, lotes, status, groupId, obsNova, 
   // Composições vinculadas sempre compartilham o mesmo status — o último
   // aplicado (inclusive remover, status=null) vale pra todas as vinculadas.
   if (!_pulandoPropagacao) {
-    const grupo = grupoVinculoDoSubId(groupId, selectedBairro);
+    const grupo = grupoVinculoDoSubId(groupId);
     if (grupo) {
       for (const membro of grupo.membros) {
         if (membro.subId === groupId) continue;
@@ -3955,8 +4039,14 @@ async function salvarHistoricoProspeccao(dados){
 }
 
 let _prospeccaoAtual = null; // {q, sub, imagemDataUrl}
-async function abrirModalProspeccao(qid, subId){
-  const q = QUADRAS.find(x=>x.id===qid);
+async function abrirModalProspeccao(qid, subId, bairroHint){
+  // O bairro desambigua quadras com o MESMO código em bairros diferentes
+  // (ex: 041.280 existe em Vila Nova Conceição com 14 lotes e em Moema com
+  // 1 lote). Sem ele, .find() pega a primeira do array — e essa ordem
+  // depende de qual distrito terminou de carregar primeiro, então o
+  // e-mail podia sair com os dados da quadra errada.
+  const q = (bairroHint && QUADRAS.find(x=>x.id===qid && x.bairro===bairroHint))
+         || QUADRAS.find(x=>x.id===qid);
   if (!q) return;
   const subs = getSubGroups(q);
   const sub = subs.find(s=>s.subId===subId) || subs[0];
@@ -4182,7 +4272,7 @@ async function confirmarExclusaoAntesDeEnviar(){
     fecharModalProspeccao();
     return;
   }
-  await abrirModalProspeccao(q.id, novoSub.subId);
+  await abrirModalProspeccao(q.id, novoSub.subId, q.bairro);
   // Os lotes mantidos podem ter ficado fisicamente separados em mais de uma
   // peça (ex: retirar um lote do meio divide o resto em dois pedaços) — só
   // uma delas entra neste envio; avisa com clareza, sem deixar isso
@@ -5321,7 +5411,7 @@ function iniciarModoVinculo(subIdOrigem, bairroOrigem){
   if (_modoVinculoAtivo) return;
   closeDetail();
   _modoVinculoAtivo = {origemSubId: subIdOrigem, origemBairro: bairroOrigem, selecionados: [], grupoIdExistente: null};
-  const grupoExistente = grupoVinculoDoSubId(subIdOrigem, bairroOrigem);
+  const grupoExistente = grupoVinculoDoSubId(subIdOrigem);
   if (grupoExistente) {
     _modoVinculoAtivo.grupoIdExistente = grupoExistente.grupoId;
     _modoVinculoAtivo.selecionados = grupoExistente.membros
@@ -6299,7 +6389,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
       <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
-      <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
+      <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
     ${(() => {
@@ -6342,7 +6432,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
       <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
-      <button class="act-btn prim" onclick="abrirModalProspeccao('${q.id}','${_stats.subId}')">📧 Enviar Prospecção</button>
+      <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
     ${(() => {
