@@ -3083,12 +3083,15 @@ function iniciarSincronizacaoProspeccao(){
 // confiável, então buscamos a peça atual que mais se sobrepõe a ela.
 function subAtualDaProspeccao(st){
   if (!st || !st.qid) return null;
-  // O bairro é parte da identidade da quadra: existem quadras com o MESMO
-  // código em bairros diferentes. Sem ele, pegaríamos a primeira da lista
-  // e resolveríamos pra uma composição em outro lugar da cidade.
-  const q = st.bairro
-    ? QUADRAS.find(x => x.id === st.qid && x.bairro === st.bairro)
-    : QUADRAS.find(x => x.id === st.qid);
+  // Desde que as quadras fiscais foram unificadas (mesmo SSS.QQQ nunca
+  // mais se repete), o bairro deixou de ser necessário pra achar a quadra
+  // certa — e usá-lo como exigência rígida pode até ATRAPALHAR: uma
+  // prospecção gravada ANTES da unificação carrega o bairro de uma das
+  // metades que existia na época, que pode não bater mais com o bairro
+  // (agora único) da quadra já unificada. Por isso é só uma tentativa
+  // preferencial, nunca um bloqueio.
+  const q = (st.bairro && QUADRAS.find(x => x.id === st.qid && x.bairro === st.bairro))
+         || QUADRAS.find(x => x.id === st.qid);
   if (!q) return null;
   const subs = getSubGroups(q);
   if (st.lotes && st.lotes.length) {
@@ -3132,6 +3135,29 @@ function subAtualDoMembroVinculo(membro){
   // houver mais de um pedaço, mas é melhor que nada encontrar.
   const candidatos = subs.filter(s => s.parentId === membro.subId.split('~')[0]);
   return candidatos.sort((a,b)=>b.n-a.n)[0] || null;
+}
+// Repara prospecções gravadas ANTES da unificação de quadras (subId
+// antigo, bairro antigo) — sem isso, o registro fica "órfão": não
+// aparece como "em prospecção" na composição de verdade, e "Ver
+// composição" pode levar pro lugar errado (subs[0] genérico, já que o
+// subId antigo não bate com nenhum atual). Roda uma vez, depois de
+// unificarQuadrasDuplicadas(), e migra silenciosamente cada registro pro
+// subId correto — regrava só se realmente mudou algo.
+async function repararProspeccoesAposUnificacao(){
+  const entradas = Object.entries(PROSPECCAO_STATUS_CACHE);
+  for (const [chaveAntiga, dados] of entradas) {
+    const subAtual = subAtualDaProspeccao(dados);
+    if (!subAtual || subAtual.subId === chaveAntiga) continue; // já está certo, ou não achou onde encaixar
+    const dadosCorrigidos = {...dados, subId: subAtual.subId, lotes: subAtual.lotes, area: subAtual.area};
+    delete PROSPECCAO_STATUS_CACHE[chaveAntiga];
+    PROSPECCAO_STATUS_CACHE[subAtual.subId] = dadosCorrigidos;
+    if (_fbAtivo) {
+      try {
+        await _fbDb.ref('prospeccao_status/'+sqlToFbKey(subAtual.subId)).set(dadosCorrigidos);
+        await _fbDb.ref('prospeccao_status/'+sqlToFbKey(chaveAntiga)).remove();
+      } catch(e) { console.warn('Falha ao reparar prospecção (subId antigo: '+chaveAntiga+'):', e); }
+    }
+  }
 }
 async function marcarProspeccaoAtiva(subId, dados, _pulandoPropagacao){
   PROSPECCAO_STATUS_CACHE[subId] = dados; // otimista
@@ -7314,6 +7340,7 @@ function iniciarApp(){
 
   Promise.all([iniciarSincronizacaoLotes(), iniciarSincronizacaoProspeccao(), iniciarSincronizacaoDescarte(), iniciarSincronizacaoFuturo(), iniciarSincronizacaoProprietarios(), iniciarSincronizacaoEmpreendimentoIgnorado(), iniciarSincronizacaoVinculos(), carregarItbiComparaveis(), carregarDistritosIniciais()]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
+    await repararProspeccoesAposUnificacao(); // corrige prospecções gravadas antes da unificação de quadras
     // Perímetros só das regiões que NÃO vieram pré-carregadas — desenhados
     // depois de carregarDistritosIniciais() já ter marcado as 21 iniciais
     // como carregadas, senão elas apareceriam com o perímetro por cima.
