@@ -6069,6 +6069,52 @@ function mostrarToast(msg, ms){
 function abrirGeosampa(lat, lon){
   window.open(`https://novogeosampa.prefeitura.sp.gov.br/#map=18.98/${lat}/${lon}/0&layers=103/100/100/,352/100/100/&basemap=4/100/100`, '_blank');
 }
+// Integração com o LandBank da Kamila (https://nnyuny.github.io/Yuny.terrenos/)
+// — abre o cadastro de "Novo Terreno" já preenchido, sem precisar digitar
+// nada de novo lá. Reaproveita o que o Buscador já calcula pra cada
+// composição: endereço de referência (geocodificação reversa), centro
+// geométrico, dados combinados de vínculo (quando existir) e o corretor
+// já em prospecção (se houver).
+//
+// window.open('', '_blank') ANTES de qualquer await: é isso que evita o
+// bloqueador de pop-up do navegador — chamado assim, síncrono, dentro do
+// clique, o navegador entende que foi o usuário que pediu. Se a busca de
+// endereço rodasse antes do primeiro open(), o navegador bloquearia por
+// não parecer mais uma ação direta do clique.
+async function enviarProLandBank(qid, subId, bairroHint){
+  const janela = window.open('', '_blank');
+  const q = (bairroHint && QUADRAS.find(x=>x.id===qid && x.bairro===bairroHint)) || QUADRAS.find(x=>x.id===qid);
+  if (!q) { if (janela) janela.close(); return; }
+  const subs = getSubGroups(q);
+  const sub = subs.find(s=>s.subId===subId) || subs[0];
+  if (!sub) { if (janela) janela.close(); return; }
+
+  const qidBase = q.id.split('-')[0];
+  const combo = statsCombinadoParaFicha(sub.subId, q, currentProfile==='compacto');
+  // Composições vinculadas mandam TODOS os lotes de todas as partes —
+  // mesmo princípio já usado no e-mail de prospecção.
+  const gruposLotes = combo ? combo.gruposLotes : [{qidBase, lotes: sub.lotes}];
+  const sqls = gruposLotes.flatMap(g => g.lotes.map(l => sqlComDigito(`${g.qidBase}.${l}`)));
+  const area = Math.round(combo ? combo.area : sub.area);
+
+  const centro = centroDaComposicao(qidBase, sub);
+  const endereco = centro ? await buscarEnderecoReferencia(centro.lat, centro.lon) : null;
+  const dadosProsp = PROSPECCAO_STATUS_CACHE[sub.subId];
+  const corretor = dadosProsp ? dadosProsp.corretor : '';
+
+  const p = new URLSearchParams();
+  if (endereco) p.set('endereco', endereco);
+  p.set('bairro', q.bairro);
+  p.set('area', String(area));
+  sqls.forEach(s => p.append('sql', s)); // várias ocorrências de "sql" — o formulário dela tem uma tabela de lotes, não um campo único
+  if (corretor) p.set('corretor', corretor);
+  p.set('obs', `Quadra fiscal ${formatarQidExibicao(qidBase)} · ${sqls.length} lote(s) via Buscador de Terrenos${combo?' (composição combinada c/ vínculo)':''}`);
+  p.set('fonte', 'matheus');
+
+  const url = 'https://nnyuny.github.io/Yuny.terrenos/#novoterreno&' + p.toString();
+  if (janela && !janela.closed) janela.location.href = url;
+  else window.open(url, '_blank'); // navegador bloqueou o open() inicial — tenta de novo mesmo assim
+}
 function abrirGoogleMaps(lat, lon){
   window.open(`https://www.google.com/maps/search/?api=1&query=${lat},${lon}`, '_blank');
 }
@@ -6450,6 +6496,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
       <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
+      <button class="act-btn" style="background:#5c2d91;color:#fff" onclick='enviarProLandBank("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📤 Enviar pro LandBank</button>
       <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
@@ -6493,6 +6540,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
       <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
+      <button class="act-btn" style="background:#5c2d91;color:#fff" onclick='enviarProLandBank("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📤 Enviar pro LandBank</button>
       <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
