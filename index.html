@@ -514,6 +514,9 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     <button class="btn" id="btn-dashboard-prosp" onclick="abrirDashboardProspeccao()" style="position:relative">
       📊 Prospecções<span id="dash-badge-count"></span>
     </button>
+    <button class="btn" id="btn-dashboard-ale" onclick="abrirDashboardValidacaoAle()" style="position:relative;border-color:#4fc3f7;color:#0277bd">
+      ✅ Validar com Ale<span id="dash-ale-badge-count"></span>
+    </button>
     <button class="btn btn-green" onclick="exportVisible()">⬇ Exportar</button>
     <button class="btn" onclick="exportarParaConsultaProprietarios()" title="Gera um .txt com o código de todos os lotes das composições que passam pelos filtros atuais, pronto pra usar com o script de consulta de proprietários">👤 Exportar p/ consulta de donos</button>
   </div>
@@ -641,6 +644,24 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     <div class="basemap-ctrl" style="position:absolute;top:10px;right:10px;z-index:1000;background:#fff;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.3);overflow:hidden;display:flex;font-size:12px">
       <button id="bm-mapa" onclick="setBasemap('mapa')" style="border:none;padding:6px 12px;cursor:pointer;background:#2e7d32;color:#fff;font-weight:600">🗺 Mapa</button>
       <button id="bm-satelite" onclick="setBasemap('satelite')" style="border:none;padding:6px 12px;cursor:pointer;background:#fff;color:#333">🛰 Satélite</button>
+    </div>
+
+    <!-- RÉGUA DE MEDIÇÃO (distância/área) — igual ao Google Earth. Fica no
+         canto esquerdo, abaixo do zoom padrão do Leaflet, pra não disputar
+         espaço com os outros controles (que ficam à direita). Usa só
+         Leaflet + turf.js (já carregados no app), sem biblioteca nova. -->
+    <button id="btn-regua" onclick="toggleModoRegua()" title="Régua de medição (distância/área)"
+      style="position:absolute;top:122px;left:10px;z-index:1000;background:#fff;border:2px solid rgba(0,0,0,.25);border-radius:4px;width:34px;height:34px;font-size:16px;cursor:pointer;line-height:1">📏</button>
+    <div id="regua-painel" style="display:none;position:absolute;top:162px;left:10px;z-index:1000;background:#fff;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.35);padding:8px 9px;font-size:12px;min-width:168px">
+      <div style="display:flex;gap:4px;margin-bottom:6px">
+        <button id="regua-modo-distancia" onclick="mudarModoRegua('distancia')" style="flex:1;padding:4px 2px;font-size:10.5px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:#ffe0b2">📏 Distância</button>
+        <button id="regua-modo-area" onclick="mudarModoRegua('area')" style="flex:1;padding:4px 2px;font-size:10.5px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:#fff">▱ Área</button>
+      </div>
+      <div id="regua-valor" style="font-weight:700;font-size:14px;color:#e65100;text-align:center;padding:5px 2px;background:#fff8f0;border-radius:4px">Clique no mapa pra começar</div>
+      <div style="display:flex;gap:4px;margin-top:6px">
+        <button onclick="limparMedicao()" style="flex:1;padding:4px 2px;font-size:10.5px;border:1px solid #ccc;border-radius:4px;cursor:pointer">🗑️ Limpar</button>
+        <button onclick="toggleModoRegua()" style="flex:1;padding:4px 2px;font-size:10.5px;border:1px solid #ccc;border-radius:4px;cursor:pointer">✕ Fechar</button>
+      </div>
     </div>
     <!-- Fontes alternativas de satélite — a pedido do Matheus (a versão
          histórica não estava sendo útil: resolução baixa e sem ajudar a
@@ -841,6 +862,18 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     <div id="dash-conteudo"></div>
     <div class="dash-footer">
       <button onclick="fecharDashboardProspeccao()">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── DASHBOARD DE VALIDAR COM O ALE ──────────────────────────────── -->
+<div class="dash-overlay" id="dash-ale-overlay">
+  <div class="dash-modal">
+    <h3>✅ Validar com o Ale</h3>
+    <div class="sub">Composições marcadas pra validar com o gestor antes de ir pra prospecção.</div>
+    <div id="dash-ale-conteudo"></div>
+    <div class="dash-footer">
+      <button onclick="fecharDashboardValidacaoAle()">Fechar</button>
     </div>
   </div>
 </div>
@@ -1081,15 +1114,36 @@ async function salvarProprietario(sql){
 // Bloco que aparece dentro de cada lote na ficha
 function htmlProprietario(sql){
   const safe = sql.replace(/\./g,'-');
-  const p = PROPRIETARIOS_CACHE[sql];
-  if (p) {
-    const d = new Date(p.data);
+  const manual = PROPRIETARIOS_CACHE[sql];
+  if (manual) {
+    const d = new Date(manual.data);
     const quando = `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
     return `<div class="prop-box">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
         <div>
-          <div class="prop-nome">👤 ${escapeHtmlHistorico(p.nome)}</div>
-          <div class="prop-meta">consultado em ${quando} por ${escapeHtmlHistorico(p.por)}</div>
+          <div class="prop-nome">👤 ${escapeHtmlHistorico(manual.nome)}</div>
+          <div class="prop-meta">consultado em ${quando} por ${escapeHtmlHistorico(manual.por)}</div>
+        </div>
+        <button class="prop-btn" onclick="consultarProprietario('${sql}')">Atualizar</button>
+      </div>
+      <div class="prop-form" id="prop-form-${safe}" style="display:none">
+        <input id="prop-input-${safe}" placeholder="Cole o nome atualizado">
+        <button onclick="salvarProprietario('${sql}')">Salvar</button>
+      </div>
+    </div>`;
+  }
+  // Sem cadastro manual — mas pode ter vindo da consulta em massa (script
+  // consultar_proprietarios.py, carregada em PROPRIETARIOS). Sem data/quem
+  // consultou nesse caso (o script não registra isso pessoa a pessoa), mas
+  // o nome já é exibido — é exatamente essa fonte que ficava faltando
+  // aparecer aqui, mesmo já valendo na tabela "Lotes contíguos" da ficha.
+  const nomeEmMassa = PROPRIETARIOS[sql];
+  if (nomeEmMassa) {
+    return `<div class="prop-box">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
+        <div>
+          <div class="prop-nome">👤 ${escapeHtmlHistorico(nomeEmMassa)}</div>
+          <div class="prop-meta">via consulta em massa (sem data/quem individual)</div>
         </div>
         <button class="prop-btn" onclick="consultarProprietario('${sql}')">Atualizar</button>
       </div>
@@ -3052,16 +3106,16 @@ let PROSPECCAO_HISTORICO_CACHE = {}; // subId -> [{key,data,texto,lote}, ...] (m
 
 function corComposicao(key, corBase, lotesAtuais){
   const status = PROSPECCAO_STATUS_CACHE[key];
-  if (!status) return corBase;
-  // Só pinta de azul (em prospecção) se TODOS os lotes desenhados agora
-  // ainda estiverem na lista de lotes da prospecção. Sem essa checagem,
-  // um lote retirado manualmente (removerLotesDaProspeccao encolhe
-  // status.lotes) continuava aparecendo azul, porque o desenho inteiro da
-  // composição física (mesmo polígono de sempre) só olhava se EXISTIA
-  // algum registro pra aquele subId — não se ele ainda cobria os lotes
-  // certos.
-  if (lotesAtuais && !lotesAtuais.every(l => status.lotes.includes(l))) return corBase;
-  return COR_PROSPECCAO;
+  if (status && (!lotesAtuais || lotesAtuais.every(l => status.lotes.includes(l)))) {
+    return COR_PROSPECCAO;
+  }
+  // "Validar com o Ale" só aparece se a composição NÃO estiver em
+  // prospecção — prospecção é um estado mais avançado, tem prioridade.
+  const validacao = VALIDACAO_ALE_CACHE[key];
+  if (validacao && (!lotesAtuais || lotesAtuais.every(l => validacao.lotes.includes(l)))) {
+    return COR_VALIDACAO_ALE;
+  }
+  return corBase;
 }
 
 function iniciarSincronizacaoProspeccao(){
@@ -3194,6 +3248,89 @@ async function repararProspeccoesAposUnificacao(){
     }
   }
 }
+// ── Validar com o Ale ──────────────────────────────────────────────
+// Marcação simples (sem corretor/e-mail) pra sinalizar que uma composição
+// precisa ser validada com o gestor antes de seguir pra prospecção de
+// verdade. Não interfere em nada mais na composição — só muda a cor no
+// mapa (destaque próprio) e aparece numa lista separada.
+const COR_VALIDACAO_ALE = '#4fc3f7';
+let VALIDACAO_ALE_CACHE = {}; // subId -> {subId, qid, bairro, lotes, area, dataMarcado, marcadoPor}
+
+function iniciarSincronizacaoValidacaoAle(){
+  return new Promise((resolve) => {
+    if (!_fbAtivo) { resolve(); return; }
+    let primeira = true;
+    _fbDb.ref('validacao_ale_status').on('value', snapshot => {
+      const dados = snapshot.val() || {};
+      const novo = {};
+      Object.values(dados).forEach(v => { if (v && v.subId) novo[v.subId] = v; });
+      VALIDACAO_ALE_CACHE = novo;
+      if (primeira) { primeira = false; resolve(); }
+      else {
+        renderQuadraMarkers(); renderQuadraList();
+        if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
+        atualizarDashboardValidacaoAleSeAberto();
+      }
+    }, err => { avisarErroSincronizacao('validacao_ale_status', err); primeira=false; resolve(); });
+  });
+}
+
+async function marcarValidacaoAle(subId, dados, _pulandoPropagacao){
+  VALIDACAO_ALE_CACHE[subId] = dados; // otimista
+  if (_fbAtivo) {
+    try { await _fbDb.ref('validacao_ale_status/'+sqlToFbKey(subId)).set(dados); }
+    catch(e) { console.warn('Não foi possível salvar a marcação de validação:', e); }
+  }
+  // Mesmo princípio das composições vinculadas na prospecção: marca todas
+  // as partes da mesma negociação juntas.
+  if (!_pulandoPropagacao) {
+    const grupo = grupoVinculoDoSubId(subId);
+    if (grupo) {
+      for (const membro of grupo.membros) {
+        const subMembro = subAtualDoMembroVinculo(membro);
+        if (!subMembro || subMembro.subId === subId) continue;
+        await marcarValidacaoAle(subMembro.subId,
+          {...dados, subId: subMembro.subId, qid: subMembro.parentId, bairro: membro.bairro, lotes: subMembro.lotes, area: subMembro.area},
+          true);
+      }
+    }
+  }
+}
+
+async function removerValidacaoAle(subId, _pulandoPropagacao){
+  delete VALIDACAO_ALE_CACHE[subId]; // otimista
+  if (_fbAtivo) {
+    try { await _fbDb.ref('validacao_ale_status/'+sqlToFbKey(subId)).remove(); }
+    catch(e) { console.warn('Não foi possível remover a marcação de validação:', e); }
+  }
+  if (!_pulandoPropagacao) {
+    const grupo = grupoVinculoDoSubId(subId);
+    if (grupo) {
+      for (const membro of grupo.membros) {
+        const subMembro = subAtualDoMembroVinculo(membro);
+        const subIdAtual = subMembro ? subMembro.subId : membro.subId;
+        if (subIdAtual !== subId && VALIDACAO_ALE_CACHE[subIdAtual]) {
+          await removerValidacaoAle(subIdAtual, true);
+        }
+      }
+    }
+  }
+}
+// Chamado direto pelo botão na ficha — alterna entre marcar/desmarcar
+async function toggleValidacaoAleUI(qidBase, subId, bairro, lotes, area){
+  if (VALIDACAO_ALE_CACHE[subId]) {
+    await removerValidacaoAle(subId);
+    mostrarToast('Marcação de validação removida.');
+  } else {
+    await marcarValidacaoAle(subId, {
+      subId, qid: qidBase, bairro, lotes, area, dataMarcado: new Date().toISOString(),
+      marcadoPor: (_usuarioAtual && (_usuarioAtual.displayName || _usuarioAtual.email)) || '',
+    });
+    mostrarToast('Composição marcada para validar com o Ale.');
+  }
+  if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
+}
+
 async function marcarProspeccaoAtiva(subId, dados, _pulandoPropagacao){
   PROSPECCAO_STATUS_CACHE[subId] = dados; // otimista
   if (_fbAtivo) {
@@ -3323,8 +3460,8 @@ function composicaoDoLote(qidBase, loteNum){
   const candidata = QUADRAS.find(q => q.id.split('-')[0] === qidBase && q.lotes.includes(loteNum));
   return candidata ? candidata.id : qidBase;
 }
-async function adicionarHistoricoComposicao(subId, texto, lote){
-  const entrada = { data: new Date().toISOString(), texto, lote: lote || null };
+async function adicionarHistoricoComposicao(subId, texto, lote, dataCustom){
+  const entrada = { data: dataCustom || new Date().toISOString(), texto, lote: lote || null };
   // otimista: já aparece na lista antes da confirmação do Firebase
   PROSPECCAO_HISTORICO_CACHE[subId] = [{key:'_tmp'+Date.now(), ...entrada}, ...(PROSPECCAO_HISTORICO_CACHE[subId]||[])];
   if (!_fbAtivo) return true;
@@ -3335,9 +3472,26 @@ async function adicionarHistoricoComposicao(subId, texto, lote){
 // Data da atualização mais recente de uma composição: o envio inicial conta
 // como uma atualização, então usamos o histórico (que já inclui esse envio);
 // se por algum motivo não houver histórico ainda, cai pra dataEnvio.
+//
+// Precisa checar DUAS chaves possíveis: o subId ATUAL (pode ter sufixo
+// dinâmico "~N", de divisão por zona/restrição — muda com o tempo) e o
+// qidReal PERMANENTE (com sufixo -b/-c, se houver, mas sem o "~N"). Um
+// registro manual salvo num momento em que a composição estava com um
+// subId diferente do de agora ficava "invisível" pra essa contagem —
+// mesmo aparecendo certo na lista do histórico (que já mesclava as duas
+// chaves) — fazendo o contador de dias mostrar um número bem maior que o
+// real. Também não depende do array já vir ordenado: acha o mais recente
+// comparando todas as datas.
 function ultimaAtualizacaoProspeccao(subId){
-  const hist = PROSPECCAO_HISTORICO_CACHE[subId];
-  if (hist && hist.length) return hist[0].data;
+  const qidReal = subId.split('~')[0];
+  const hist = [
+    ...(PROSPECCAO_HISTORICO_CACHE[subId] || []),
+    ...(qidReal !== subId ? (PROSPECCAO_HISTORICO_CACHE[qidReal] || []) : []),
+  ];
+  if (hist.length) {
+    return hist.reduce((maisRecente, h) =>
+      (!maisRecente || new Date(h.data) > new Date(maisRecente)) ? h.data : maisRecente, null);
+  }
   const st = PROSPECCAO_STATUS_CACHE[subId];
   return st ? st.dataEnvio : null;
 }
@@ -3855,7 +4009,10 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal, bairro){
       <div class="hist-box">${listaHtml}</div>
       <div class="hist-form">
         <textarea id="hist-novo-${qidReal.replace(/[.~]/g,'-')}" placeholder="Registrar uma atualização (negociação, visita, retorno do corretor...)"></textarea>
-        <div style="display:flex;gap:6px;align-items:center">
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <label style="font-size:10.5px;color:#888;display:flex;align-items:center;gap:4px">Quando:
+            <input type="datetime-local" id="hist-quando-${qidReal.replace(/[.~]/g,'-')}" style="font-size:11px;padding:2px 4px" value="${new Date(Date.now() - new Date().getTimezoneOffset()*60000).toISOString().slice(0,16)}">
+          </label>
           <select id="hist-lote-${qidReal.replace(/[.~]/g,'-')}" style="flex:1">
             <option value="">Sem lote específico</option>
             ${opcoesLotes}
@@ -3870,9 +4027,18 @@ async function salvarHistoricoManualUI(qidBase){
   const safeId = qidBase.replace(/[.~]/g,'-');
   const textoEl = document.getElementById('hist-novo-'+safeId);
   const loteEl = document.getElementById('hist-lote-'+safeId);
+  const quandoEl = document.getElementById('hist-quando-'+safeId);
   const texto = textoEl.value.trim();
   if (!texto) { mostrarToast('Escreva algo antes de adicionar ao histórico.'); return; }
-  await adicionarHistoricoComposicao(qidBase, texto, loteEl.value || null);
+  // O campo datetime-local não tem fuso — interpretamos como horário LOCAL
+  // do navegador (o normal pra quem está digitando aqui em SP) e convertemos
+  // pro ISO/UTC de verdade, que é o que o resto do sistema espera.
+  let dataCustom = null;
+  if (quandoEl && quandoEl.value) {
+    const d = new Date(quandoEl.value);
+    if (!isNaN(d.getTime())) dataCustom = d.toISOString();
+  }
+  await adicionarHistoricoComposicao(qidBase, texto, loteEl.value || null, dataCustom);
   if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
   mostrarToast('Histórico atualizado!');
 }
@@ -4391,12 +4557,23 @@ function iniciarCapturaMapa(){
     ativas: nomes.filter(n => layers[n] && map.hasLayer(layers[n])),
     tinhaLotes: !!(lotesLayer && map.hasLayer(lotesLayer)),
     tinhaBusca: !!(typeof searchMarker !== 'undefined' && searchMarker && map.hasLayer(searchMarker)),
+    tinhaLoteGeosampa: !!(layers.loteGeosampa && map.hasLayer(layers.loteGeosampa)),
   };
 
   // Tira do mapa TUDO que não é a composição em análise
   _captura.ativas.forEach(n => map.removeLayer(layers[n]));
   if (_captura.tinhaLotes) map.removeLayer(lotesLayer);       // some também com os nºs dos lotes
   if (_captura.tinhaBusca) map.removeLayer(searchMarker);
+
+  // Lotes oficiais do GeoSampa aparecem de fundo durante a captura — ajuda
+  // o corretor a identificar os lotes na imagem que vai por e-mail, mesmo
+  // que essa camada não estivesse ativa no uso normal do mapa. Marca o
+  // checkbox também, pra UI não ficar inconsistente com o que se vê.
+  if (layers.loteGeosampa && !map.hasLayer(layers.loteGeosampa)) {
+    layers.loteGeosampa.addTo(map);
+    const cbGeosampa = document.getElementById('ly-loteGeosampa');
+    if (cbGeosampa) cbGeosampa.checked = true;
+  }
 
   // Desenha só a composição, em ciano Yuny, sem rótulo nenhum.
   // Renderer canvas (em vez do SVG padrão) porque canvas é copiável
@@ -4486,6 +4663,13 @@ function sairModoCaptura(voltarAoModal){
     _captura.ativas.forEach(n => { if (layers[n]) layers[n].addTo(map); });
     if (_captura.tinhaLotes && lotesLayer) lotesLayer.addTo(map);
     if (_captura.tinhaBusca && typeof searchMarker !== 'undefined' && searchMarker) searchMarker.addTo(map);
+    // Volta a camada de lotes oficiais ao estado de antes de entrar na
+    // captura — só tira se ela não estava ativa originalmente.
+    if (!_captura.tinhaLoteGeosampa && layers.loteGeosampa && map.hasLayer(layers.loteGeosampa)) {
+      map.removeLayer(layers.loteGeosampa);
+      const cbGeosampa = document.getElementById('ly-loteGeosampa');
+      if (cbGeosampa) cbGeosampa.checked = false;
+    }
     const {center, zoom} = _captura;
     _captura = null;
     setTimeout(()=>{ map.invalidateSize(); map.setView(center, zoom); }, 80);
@@ -6069,6 +6253,97 @@ function mostrarToast(msg, ms){
 function abrirGeosampa(lat, lon){
   window.open(`https://novogeosampa.prefeitura.sp.gov.br/#map=18.98/${lat}/${lon}/0&layers=103/100/100/,352/100/100/&basemap=4/100/100`, '_blank');
 }
+
+// ── Régua de medição (distância/área), igual ao Google Earth ─────────
+// Usa só Leaflet (já carregado) + turf.js (já carregado, usado também no
+// cálculo de "formato do terreno") — sem nenhuma biblioteca nova, pra não
+// depender de mais um CDN externo.
+let _medicao = null; // {tipo:'distancia'|'area', pontos:[LatLng], marcadores:[L.circleMarker], layer:L.polyline|L.polygon}
+
+function toggleModoRegua(){
+  if (_medicao) { encerrarMedicao(); return; }
+  _medicao = { tipo: 'distancia', pontos: [], marcadores: [], layer: null };
+  document.getElementById('regua-painel').style.display = 'block';
+  document.getElementById('btn-regua').style.background = '#fff3e0';
+  document.getElementById('btn-regua').style.borderColor = '#e65100';
+  map.getContainer().style.cursor = 'crosshair';
+  map.on('click', _cliqueMedicao);
+  map.doubleClickZoom.disable();
+  window.addEventListener('keydown', _teclaRegua);
+  _atualizarBotoesModoRegua();
+  _atualizarPainelMedicao();
+}
+function _teclaRegua(e){
+  if (e.key === 'Escape') encerrarMedicao();
+}
+function mudarModoRegua(tipo){
+  if (!_medicao || _medicao.tipo === tipo) return;
+  limparMedicao();
+  _medicao.tipo = tipo;
+  _atualizarBotoesModoRegua();
+}
+function _atualizarBotoesModoRegua(){
+  if (!_medicao) return;
+  document.getElementById('regua-modo-distancia').style.background = _medicao.tipo==='distancia' ? '#ffe0b2' : '#fff';
+  document.getElementById('regua-modo-area').style.background = _medicao.tipo==='area' ? '#ffe0b2' : '#fff';
+}
+function _cliqueMedicao(e){
+  if (!_medicao) return;
+  _medicao.pontos.push(e.latlng);
+  const marcador = L.circleMarker(e.latlng, {radius:4, color:'#fff', weight:2, fillColor:'#e65100', fillOpacity:1, interactive:false}).addTo(map);
+  _medicao.marcadores.push(marcador);
+  _redesenharMedicao();
+}
+function _redesenharMedicao(){
+  if (!_medicao) return;
+  if (_medicao.layer) { map.removeLayer(_medicao.layer); _medicao.layer = null; }
+  const pts = _medicao.pontos;
+  if (pts.length >= 3 && _medicao.tipo === 'area') {
+    _medicao.layer = L.polygon(pts, {color:'#e65100', weight:3, fillColor:'#ff9800', fillOpacity:0.2}).addTo(map);
+  } else if (pts.length >= 2) {
+    _medicao.layer = L.polyline(pts, {color:'#e65100', weight:3, dashArray:'8 5'}).addTo(map);
+  }
+  _atualizarPainelMedicao();
+}
+function _atualizarPainelMedicao(){
+  const el = document.getElementById('regua-valor');
+  if (!_medicao || !el) return;
+  const pts = _medicao.pontos;
+  if (_medicao.tipo === 'distancia') {
+    if (pts.length < 2) { el.textContent = 'Clique no mapa pra começar'; return; }
+    let total = 0;
+    for (let i=1;i<pts.length;i++) total += pts[i-1].distanceTo(pts[i]);
+    el.textContent = total < 1000 ? `${total.toFixed(0)} m` : `${(total/1000).toFixed(2)} km`;
+  } else {
+    if (pts.length < 3) { el.textContent = pts.length===0 ? 'Clique no mapa pra começar' : 'Clique mais um ponto pra formar área'; return; }
+    const coords = pts.map(p=>[p.lng, p.lat]);
+    coords.push(coords[0]); // fecha o polígono
+    let area = 0;
+    try { area = turf.area(turf.polygon([coords])); } catch(e) { area = 0; }
+    el.textContent = area < 10000 ? `${area.toFixed(0)} m²` : `${(area/10000).toFixed(2)} ha`;
+  }
+}
+function limparMedicao(){
+  if (!_medicao) return;
+  if (_medicao.layer) map.removeLayer(_medicao.layer);
+  _medicao.marcadores.forEach(m => map.removeLayer(m));
+  _medicao.pontos = []; _medicao.marcadores = []; _medicao.layer = null;
+  _atualizarPainelMedicao();
+}
+function encerrarMedicao(){
+  if (!_medicao) return;
+  if (_medicao.layer) map.removeLayer(_medicao.layer);
+  _medicao.marcadores.forEach(m => map.removeLayer(m));
+  map.off('click', _cliqueMedicao);
+  map.doubleClickZoom.enable();
+  map.getContainer().style.cursor = '';
+  window.removeEventListener('keydown', _teclaRegua);
+  document.getElementById('regua-painel').style.display = 'none';
+  document.getElementById('btn-regua').style.background = '#fff';
+  document.getElementById('btn-regua').style.borderColor = 'rgba(0,0,0,.25)';
+  _medicao = null;
+}
+
 // Integração com o LandBank da Kamila (https://nnyuny.github.io/Yuny.terrenos/)
 // — abre o cadastro de "Novo Terreno" já preenchido, sem precisar digitar
 // nada de novo lá. Reaproveita o que o Buscador já calcula pra cada
@@ -6498,6 +6773,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
       <button class="act-btn" style="background:#5c2d91;color:#fff" onclick='enviarProLandBank("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📤 Enviar pro LandBank</button>
       <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção</button>
+      <button class="act-btn" style="border-color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#90a4ae'};color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#607d8b'}" onclick='toggleValidacaoAleUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${VALIDACAO_ALE_CACHE[_stats.subId]?"↩️ Remover validação com o Ale":"✅ Validar com o Ale"}</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
     ${(() => {
@@ -6542,6 +6818,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
       <button class="act-btn" style="background:#5c2d91;color:#fff" onclick='enviarProLandBank("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📤 Enviar pro LandBank</button>
       <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção</button>
+      <button class="act-btn" style="border-color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#90a4ae'};color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#607d8b'}" onclick='toggleValidacaoAleUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${VALIDACAO_ALE_CACHE[_stats.subId]?"↩️ Remover validação com o Ale":"✅ Validar com o Ale"}</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
     ${(() => {
@@ -6605,6 +6882,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
         <thead><tr>
           <th style="text-align:left;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">SQL</th>
           <th style="text-align:left;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">Proprietário</th>
+          <th style="text-align:right;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">Área (m²)</th>
         </tr></thead>
         <tbody>${(_combo
           ? _combo.gruposLotes.flatMap(g => g.lotes.map(l => g.qidBase+'.'+l))
@@ -6612,6 +6890,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
         ).map(sql => {
           const nome = nomeProprietario(sql);
           const safe = sql.replace(/\./g,'-');
+          const areaLote = LOTES_AREA[sql];
           return `<tr>
             <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2;font-family:monospace;white-space:nowrap">${sqlComDigito(sql)}</td>
             <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2">${nome
@@ -6622,6 +6901,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
                    <button onclick="salvarProprietario('${sql}')">Salvar</button>
                  </div>`
             }</td>
+            <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2;text-align:right;white-space:nowrap">${areaLote!=null ? Math.round(areaLote).toLocaleString('pt-BR') : '—'}</td>
           </tr>`;
         }).join('')}</tbody>
       </table>
@@ -7101,6 +7381,7 @@ function abrirPopupLote(sql, groupId, latlng){
 
 map.on('click', function(e){
   if (_captura) return;   // no modo captura o mapa é só visual
+  if (_medicao) return;   // no modo régua, o clique é só pra marcar ponto de medição (ver _cliqueMedicao)
   if (_modoVinculoAtivo) { processarCliqueModoVinculo(e); return; }
   const candidatos = candidatosNoClique(e);
   if (candidatos.length === 0) return;
@@ -7386,6 +7667,89 @@ function construirDashboardProspeccao(){
     </table>`;
 }
 
+// ── Dashboard de Validar com o Ale ────────────────────────────────
+function construirDashboardValidacaoAle(){
+  const linhasBrutas = Object.values(VALIDACAO_ALE_CACHE);
+
+  // Mesmo agrupamento por vínculo já usado no dashboard de prospecção —
+  // composições vinculadas contam como uma linha só, com área somada.
+  const jaAgrupadas = new Set();
+  const linhas = [];
+  linhasBrutas.forEach(l => {
+    if (jaAgrupadas.has(l.subId)) return;
+    const grupoVinc = grupoVinculoDoSubId(l.subId);
+    if (grupoVinc) {
+      const membrosDoGrupo = new Set(grupoVinc.membros.map(m => {
+        const subAtual = subAtualDoMembroVinculo(m);
+        return subAtual ? subAtual.subId : m.subId;
+      }));
+      const linhasDoGrupo = linhasBrutas.filter(x => membrosDoGrupo.has(x.subId));
+      linhasDoGrupo.forEach(x => jaAgrupadas.add(x.subId));
+      if (!linhasDoGrupo.length) return;
+      const area = linhasDoGrupo.reduce((s,x)=>s+(x.area||0),0);
+      const maisRecente = [...linhasDoGrupo].sort((a,b)=> new Date(b.dataMarcado)-new Date(a.dataMarcado))[0];
+      linhas.push({
+        ...maisRecente,
+        subId: linhasDoGrupo.map(x=>x.subId).join(' + '),
+        area,
+        _irParaQid: maisRecente.qid, _irParaSubId: maisRecente.subId, _irParaBairro: maisRecente.bairro,
+        vinculado: true,
+      });
+    } else {
+      jaAgrupadas.add(l.subId);
+      linhas.push({...l, _irParaQid: l.qid, _irParaSubId: l.subId, _irParaBairro: l.bairro});
+    }
+  });
+  linhas.sort((a,b) => new Date(b.dataMarcado) - new Date(a.dataMarcado));
+
+  const areaTotal = linhas.reduce((s,l)=>s+(l.area||0),0);
+  const cardsHtml = `
+    <div class="dash-cards">
+      <div class="dash-card"><div class="n">${linhas.length}</div><div class="l">Aguardando validação</div></div>
+      <div class="dash-card"><div class="n">${(areaTotal/1000).toFixed(1)}k</div><div class="l">m² no total</div></div>
+    </div>`;
+
+  if (!linhas.length) {
+    return cardsHtml + '<div class="dash-vazio">Nenhuma composição marcada pra validar com o Ale no momento.</div>';
+  }
+
+  const linhasHtml = linhas.map(l => `
+    <tr>
+      <td><strong>${l.subId}</strong>${l.vinculado?' <span style="font-size:9px;background:#f9a825;color:#6d4c00;border-radius:3px;padding:1px 5px">🔗 vinculadas</span>':''}</td>
+      <td>${l.bairro}</td>
+      <td>${(l.area||0).toLocaleString('pt-BR')} m²</td>
+      <td>${escapeHtmlHistorico(l.marcadoPor||'—')}</td>
+      <td>${formatarDataHistorico(l.dataMarcado)}</td>
+      <td style="display:flex;gap:4px">
+        <button class="dash-row-btn" onclick='irParaComposicaoDashboard("${l._irParaQid}","${l._irParaSubId}","${(l._irParaBairro||"").replace(/"/g,"&quot;")}")'>Ver composição</button>
+        <button class="dash-row-btn" style="border-color:#c62828;color:#c62828" onclick="removerValidacaoAle('${l._irParaSubId}').then(atualizarDashboardValidacaoAleSeAberto)">Remover</button>
+      </td>
+    </tr>`).join('');
+
+  return cardsHtml + `
+    <table class="dash-table">
+      <thead><tr>
+        <th>Quadra</th><th>Bairro</th><th>Área</th><th>Marcado por</th><th>Em</th><th></th>
+      </tr></thead>
+      <tbody>${linhasHtml}</tbody>
+    </table>`;
+}
+function abrirDashboardValidacaoAle(){
+  document.getElementById('dash-ale-conteudo').innerHTML = construirDashboardValidacaoAle();
+  document.getElementById('dash-ale-overlay').classList.add('on');
+}
+function fecharDashboardValidacaoAle(){
+  document.getElementById('dash-ale-overlay').classList.remove('on');
+}
+function atualizarDashboardValidacaoAleSeAberto(){
+  if (document.getElementById('dash-ale-overlay').classList.contains('on')) {
+    document.getElementById('dash-ale-conteudo').innerHTML = construirDashboardValidacaoAle();
+  }
+  const badge = document.getElementById('dash-ale-badge-count');
+  const total = Object.keys(VALIDACAO_ALE_CACHE).length;
+  if (badge) badge.textContent = total ? ` (${total})` : '';
+}
+
 function abrirDashboardProspeccao(){
   document.getElementById('dash-conteudo').innerHTML = construirDashboardProspeccao();
   document.getElementById('dash-overlay').classList.add('on');
@@ -7455,7 +7819,7 @@ function iniciarApp(){
   currentTab='quadras';
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
-  Promise.all([iniciarSincronizacaoLotes(), iniciarSincronizacaoProspeccao(), iniciarSincronizacaoDescarte(), iniciarSincronizacaoFuturo(), iniciarSincronizacaoProprietarios(), iniciarSincronizacaoEmpreendimentoIgnorado(), iniciarSincronizacaoVinculos(), carregarItbiComparaveis(), carregarProprietarios(), carregarDistritosIniciais()]).then(async () => {
+  Promise.all([iniciarSincronizacaoLotes(), iniciarSincronizacaoProspeccao(), iniciarSincronizacaoDescarte(), iniciarSincronizacaoFuturo(), iniciarSincronizacaoProprietarios(), iniciarSincronizacaoEmpreendimentoIgnorado(), iniciarSincronizacaoVinculos(), iniciarSincronizacaoValidacaoAle(), carregarItbiComparaveis(), carregarProprietarios(), carregarDistritosIniciais()]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
     await repararProspeccoesAposUnificacao(); // corrige prospecções gravadas antes da unificação de quadras
     // Perímetros só das regiões que NÃO vieram pré-carregadas — desenhados
@@ -7468,6 +7832,7 @@ function iniciarApp(){
     carregarCorretores();
     abrirDashboardProspeccao(); // toda vez que o sistema abre, mostra o resumo
     atualizarDashboardProspeccaoSeAberto();
+    atualizarDashboardValidacaoAleSeAberto();
   }).catch(() => {
     loadPerimetrosLayer();
     atualizarContadorRegioes();
