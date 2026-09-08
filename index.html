@@ -6795,8 +6795,17 @@ function selectQuadra(qid, subId, manterView, bairroHint){
           map.panTo(_bounds.getCenter());
         }
       }
-      catch(e){ map.panTo([q.lat,q.lon]); }
-    } else { map.panTo([q.lat,q.lon]); }
+      catch(e){ map.setView([q.lat,q.lon], 17); }
+    } else {
+      // O polígono ainda não está desenhado no mapa — normalmente porque
+      // a composição fica longe da área visível atual (ex: veio de um
+      // "Ver composição" de algum dashboard). Sem isso, cair só num
+      // panTo deixava a composição minúscula, no zoom que a tela já
+      // estivesse — por isso agora sempre dá zoom pra um nível que
+      // mostra bem a composição, mesmo sem saber o tamanho exato dela
+      // ainda (o polígono desenha depois que o mapa chega lá).
+      map.setView([q.lat,q.lon], 17);
+    }
   }
   // Mostra no mapa e na ficha só os lotes desta parte específica — sem misturar
   // com lotes restritos (a menos que a própria parte seja a composição restrita)
