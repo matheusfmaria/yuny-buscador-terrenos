@@ -489,6 +489,24 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
   </div>
 </div>
 
+<!-- ── CAIXA DE CARREGAMENTO (aparece entre o login e o mapa ficar pronto) ──
+     Pedido do Matheus: o "Carregando..." pequeno no topo passava
+     despercebido. Essa caixa é bem mais visível, com identidade oficial da
+     Yuny (cores do manual "Território de Marca"), percentual e barra de
+     progresso reais — calculados a partir de quantas etapas de
+     carregamento (sincronizações + distritos) já terminaram. -->
+<div id="carga-overlay" style="position:fixed;inset:0;z-index:19999;background:#1a2e1a;display:none;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:14px;max-width:380px;width:100%;padding:32px 30px;box-shadow:0 12px 40px rgba(0,0,0,.35);text-align:center">
+    <div style="background:#00B0B9;color:#fff;font-size:13px;font-weight:700;letter-spacing:.12em;padding:6px 14px;border-radius:6px;display:inline-block;margin-bottom:18px">YUNY</div>
+    <h2 style="margin:0 0 8px;font-size:17px;color:#141414;font-weight:600">Carregando o Buscador de terrenos</h2>
+    <div id="carga-status" style="font-size:12.5px;color:#888;margin-bottom:20px;line-height:1.5;min-height:18px">Preparando os dados…</div>
+    <div style="background:#E4E3DE;border-radius:20px;height:10px;overflow:hidden;margin-bottom:10px">
+      <div id="carga-barra" style="background:#00B0B9;height:100%;width:2%;border-radius:20px;transition:width .35s ease"></div>
+    </div>
+    <div id="carga-percentual" style="font-size:22px;font-weight:700;color:#00B0B9">0%</div>
+  </div>
+</div>
+
 <div class="topbar">
   <div class="tb-left">
     <span class="logo">YUNY</span>
@@ -2271,9 +2289,11 @@ async function carregarDistritosIniciais(){
       const pacote = await fetchComCache(info.arquivo);
       mesclarPacoteDistrito(pacote);
       regioesCarregadas.add(info.distrito);
+      _incrementarProgressoCarga(`Carregando ${info.bairro}…`);
       return true;
     } catch(e) {
       console.warn('Falha ao pré-carregar distrito inicial:', info.distrito, e);
+      _incrementarProgressoCarga(`Carregando ${info.bairro}…`);
       return false;
     }
   }));
@@ -3055,6 +3075,40 @@ function sairDaConta(){
   _fbAuth.signOut().then(()=>{ location.reload(); });
 }
 
+// ── Controle de progresso da caixa de carregamento ────────────────────
+// Cada "unidade" é uma etapa de carregamento (uma sincronização do
+// Firebase, ou um distrito inteiro) — o percentual é sempre
+// unidadesConcluidas/unidadesTotais, nunca um número inventado/estimado.
+let _progressoCarga = { total: 1, feito: 0 };
+function _resetProgressoCarga(totalUnidades){
+  _progressoCarga = { total: Math.max(1, totalUnidades), feito: 0 };
+  _renderProgressoCarga();
+}
+function _incrementarProgressoCarga(rotulo){
+  _progressoCarga.feito = Math.min(_progressoCarga.total, _progressoCarga.feito + 1);
+  if (rotulo) {
+    const el = document.getElementById('carga-status');
+    if (el) el.textContent = rotulo;
+  }
+  _renderProgressoCarga();
+}
+function _renderProgressoCarga(){
+  const pct = Math.min(100, Math.round((_progressoCarga.feito / _progressoCarga.total) * 100));
+  const barra = document.getElementById('carga-barra');
+  const texto = document.getElementById('carga-percentual');
+  if (barra) barra.style.width = pct + '%';
+  if (texto) texto.textContent = pct + '%';
+}
+// Encadeia numa promessa existente (uma sincronização, etc.) sem mudar o
+// valor resolvido — só marca "mais uma etapa concluída" quando ela termina,
+// dê certo ou errado (uma sincronização que falha ainda assim "termina").
+function _comProgressoCarga(promessa, rotulo){
+  return promessa.then(
+    r => { _incrementarProgressoCarga(rotulo); return r; },
+    e => { _incrementarProgressoCarga(rotulo); throw e; }
+  );
+}
+
 function _liberarApp(user){
   _usuarioAtual = user;
   document.getElementById('login-gate').classList.add('oculto');
@@ -3064,6 +3118,7 @@ function _liberarApp(user){
   }
   if (_appIniciado) return;   // não deixa iniciar duas vezes
   _appIniciado = true;
+  document.getElementById('carga-overlay').style.display = 'flex';
   iniciarApp();
 }
 
@@ -7819,7 +7874,22 @@ function iniciarApp(){
   currentTab='quadras';
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
-  Promise.all([iniciarSincronizacaoLotes(), iniciarSincronizacaoProspeccao(), iniciarSincronizacaoDescarte(), iniciarSincronizacaoFuturo(), iniciarSincronizacaoProprietarios(), iniciarSincronizacaoEmpreendimentoIgnorado(), iniciarSincronizacaoVinculos(), iniciarSincronizacaoValidacaoAle(), carregarItbiComparaveis(), carregarProprietarios(), carregarDistritosIniciais()]).then(async () => {
+  const numDistritosIniciais = DISTRITOS_DISPONIVEIS.filter(d => DISTRITOS_INICIAIS.includes(d.distrito)).length;
+  _resetProgressoCarga(numDistritosIniciais + 10); // 10 = as outras tarefas do Promise.all abaixo
+
+  Promise.all([
+    _comProgressoCarga(iniciarSincronizacaoLotes(), 'Sincronizando restrições…'),
+    _comProgressoCarga(iniciarSincronizacaoProspeccao(), 'Sincronizando prospecções…'),
+    _comProgressoCarga(iniciarSincronizacaoDescarte(), 'Sincronizando descartes…'),
+    _comProgressoCarga(iniciarSincronizacaoFuturo(), 'Sincronizando futuros lançamentos…'),
+    _comProgressoCarga(iniciarSincronizacaoProprietarios(), 'Sincronizando proprietários…'),
+    _comProgressoCarga(iniciarSincronizacaoEmpreendimentoIgnorado(), 'Sincronizando empreendimentos ignorados…'),
+    _comProgressoCarga(iniciarSincronizacaoVinculos(), 'Sincronizando vínculos…'),
+    _comProgressoCarga(iniciarSincronizacaoValidacaoAle(), 'Sincronizando validações…'),
+    _comProgressoCarga(carregarItbiComparaveis(), 'Carregando comparáveis de ITBI…'),
+    _comProgressoCarga(carregarProprietarios(), 'Carregando nomes de proprietários…'),
+    carregarDistritosIniciais(),
+  ]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
     await repararProspeccoesAposUnificacao(); // corrige prospecções gravadas antes da unificação de quadras
     // Perímetros só das regiões que NÃO vieram pré-carregadas — desenhados
@@ -7833,11 +7903,13 @@ function iniciarApp(){
     abrirDashboardProspeccao(); // toda vez que o sistema abre, mostra o resumo
     atualizarDashboardProspeccaoSeAberto();
     atualizarDashboardValidacaoAleSeAberto();
+    document.getElementById('carga-overlay').style.display = 'none';
   }).catch(() => {
     loadPerimetrosLayer();
     atualizarContadorRegioes();
     applyFilters();
     atualizarFiltroRestricoes();
+    document.getElementById('carga-overlay').style.display = 'none';
   });
 }
 
