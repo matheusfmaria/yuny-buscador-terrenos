@@ -535,9 +535,6 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     <button class="btn" id="btn-dashboard-ale" onclick="abrirDashboardValidacaoAle()" style="position:relative;border-color:#fbc02d;color:#8d6e00">
       ✅ Validar com Ale<span id="dash-ale-badge-count"></span>
     </button>
-    <button class="btn" id="btn-dashboard-baixa-prioridade" onclick="abrirDashboardBaixaPrioridade()" style="position:relative;border-color:#fb8c00;color:#e65100">
-      🔽 Baixa prioridade<span id="dash-bp-badge-count"></span>
-    </button>
     <button class="btn btn-green" onclick="exportVisible()">⬇ Exportar</button>
     <button class="btn" onclick="exportarParaConsultaProprietarios()" title="Gera um .txt com o código de todos os lotes das composições que passam pelos filtros atuais, pronto pra usar com o script de consulta de proprietários">👤 Exportar p/ consulta de donos</button>
   </div>
@@ -633,11 +630,17 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
         </div>
         <label class="check-row"><input type="checkbox" id="q-hide-ou" checked onchange="applyQFilters()"> Ocultar quadras em Operação Urbana</label>
         <div class="fl" style="margin-top:8px">Ocultar restrições no mapa</div>
-        <label class="check-row"><input type="checkbox" id="q-hide-obras" checked onchange="atualizarFiltroRestricoes()"> 🏗 Obras</label>
-        <label class="check-row"><input type="checkbox" id="q-hide-dificil" onchange="atualizarFiltroRestricoes()"> ⚠️ Difícil</label>
-        <label class="check-row"><input type="checkbox" id="q-hide-futuro" onchange="atualizarFiltroRestricoes()"> 🏢 Futuro lançamento</label>
-        <label class="check-row"><input type="checkbox" id="q-hide-descarte" onchange="atualizarFiltroRestricoes()"> 🗂️ Descarte temporário</label>
-        <label class="check-row"><input type="checkbox" id="q-hide-naoedificavel" checked onchange="atualizarFiltroRestricoes()"> 🌳 Não Edificável</label>
+        <div class="fl" style="margin-top:8px">Mostrar no mapa</div>
+        <label class="check-row"><input type="checkbox" id="q-show-disponivel" checked onchange="atualizarFiltroCategorias()"> 🟩 Disponível</label>
+        <label class="check-row"><input type="checkbox" id="q-show-prospeccao" checked onchange="atualizarFiltroCategorias()"> 🟦 Em prospecção</label>
+        <label class="check-row"><input type="checkbox" id="q-show-baixa_prioridade" checked onchange="atualizarFiltroCategorias()"> 🟧 Baixa prioridade</label>
+        <label class="check-row"><input type="checkbox" id="q-show-validar_ale" checked onchange="atualizarFiltroCategorias()"> 🟨 Validar com Ale</label>
+        <label class="check-row"><input type="checkbox" id="q-show-sobreposta" checked onchange="atualizarFiltroCategorias()"> 🟪 Sobreposta com lançamento</label>
+        <label class="check-row"><input type="checkbox" id="q-show-descarte" onchange="atualizarFiltroCategorias()"> 🟥 Descarte</label>
+        <label class="check-row"><input type="checkbox" id="q-show-futuro" onchange="atualizarFiltroCategorias()"> 🟥 Lançamento futuro</label>
+        <label class="check-row"><input type="checkbox" id="q-show-dificil" onchange="atualizarFiltroCategorias()"> 🟫 Difícil</label>
+        <label class="check-row"><input type="checkbox" id="q-show-obras" onchange="atualizarFiltroCategorias()"> ⬜ Em obras</label>
+        <label class="check-row"><input type="checkbox" id="q-show-naoedificavel" onchange="atualizarFiltroCategorias()"> ⬜ Não edificável</label>
       </div>
       <div class="list-half">
       <div class="stats-bar">
@@ -898,18 +901,6 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     <div id="dash-ale-conteudo"></div>
     <div class="dash-footer">
       <button onclick="fecharDashboardValidacaoAle()">Fechar</button>
-    </div>
-  </div>
-</div>
-
-<!-- ── DASHBOARD DE BAIXA PRIORIDADE ────────────────────────────────── -->
-<div class="dash-overlay" id="dash-bp-overlay">
-  <div class="dash-modal">
-    <h3>🔽 Baixa prioridade</h3>
-    <div class="sub">Composições marcadas pra não trabalhar por enquanto.</div>
-    <div id="dash-bp-conteudo"></div>
-    <div class="dash-footer">
-      <button onclick="fecharDashboardBaixaPrioridade()">Fechar</button>
     </div>
   </div>
 </div>
@@ -3432,7 +3423,6 @@ function iniciarSincronizacaoBaixaPrioridade(){
       else {
         renderQuadraMarkers(); renderQuadraList();
         if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
-        atualizarDashboardBaixaPrioridadeSeAberto();
       }
     }, err => { avisarErroSincronizacao('baixa_prioridade_status', err); primeira=false; resolve(); });
   });
@@ -5462,17 +5452,43 @@ function renderLoteList() {
 // passa (é histórico, não tem score/VGV pra comparar); ativo é avaliado pelos
 // SEUS PRÓPRIOS números, não mais pelo agregado de toda a quadra original —
 // assim uma restrição parcial não esconde o pedaço grande que sobrou íntegro
-// ── Filtro: ocultar restrições específicas no mapa (e na lista) ────────
-// Um pedaço "restrito" só é escondido se TODOS os lotes que o compõem
-// tiverem uma restrição marcada pra ocultar — se misturar tipos (ex: um
-// lote em Obras e outro Difícil) e só Obras estiver oculto, o pedaço
-// continua aparecendo, já que ainda tem algo relevante pra mostrar.
-let RESTRICOES_OCULTAS = new Set();
-function atualizarFiltroRestricoes(){
-  RESTRICOES_OCULTAS = new Set(
-    ['obras','dificil','futuro','descarte','naoedificavel'].filter(st => document.getElementById('q-hide-'+st)?.checked)
+// ── Filtro: quais categorias (cores) mostrar no mapa ────────────────
+// Antes era "ocultar restrições" (lista do que esconder); agora é o
+// oposto — lista do que MOSTRAR, cobrindo tanto os status "ativos"
+// (disponível, prospecção, baixa prioridade, validar com Ale, sobreposta)
+// quanto os "restritos" (descarte, futuro, difícil, obras, não
+// edificável). Padrão: os 5 "ativos" visíveis, os 5 "restritos" ocultos.
+let CATEGORIAS_VISIVEIS = new Set(['disponivel','prospeccao','baixa_prioridade','validar_ale','sobreposta']);
+function atualizarFiltroCategorias(){
+  CATEGORIAS_VISIVEIS = new Set(
+    ['disponivel','prospeccao','baixa_prioridade','validar_ale','sobreposta','descarte','futuro','dificil','obras','naoedificavel']
+      .filter(cat => document.getElementById('q-show-'+cat)?.checked)
   );
   applyQFilters();
+}
+// Categoria de uma composição/parte pra fins de filtro — mesma cadeia de
+// prioridade já usada em corComposicao() pra decidir a cor, só que
+// devolvendo o NOME da categoria em vez da cor. "Disponível" agrupa as
+// duas tonalidades de verde (CA alto/baixo) numa categoria só, de
+// propósito — o filtro não distingue por CA.
+function categoriaDoSub(q, sub){
+  if (sub.tipo === 'restrito') {
+    const qidBase = q.id.split('-')[0];
+    const statusPresentes = new Set(sub.lotes.map(l => (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status));
+    for (const cat of ['descarte','futuro','dificil','obras','naoedificavel']) {
+      if (statusPresentes.has(cat)) return cat;
+    }
+    return null;
+  }
+  const status = PROSPECCAO_STATUS_CACHE[sub.subId];
+  if (status && sub.lotes.every(l => status.lotes.includes(l))) return 'prospeccao';
+  const validacao = VALIDACAO_ALE_CACHE[sub.subId];
+  if (validacao && sub.lotes.every(l => validacao.lotes.includes(l))) return 'validar_ale';
+  const baixaPrioridade = BAIXA_PRIORIDADE_CACHE[sub.subId];
+  if (baixaPrioridade && sub.lotes.every(l => baixaPrioridade.lotes.includes(l))) return 'baixa_prioridade';
+  const qidBase = q.id.split('-')[0];
+  if (temEmpreendimentoSobreposto(qidBase, sub.lotes)) return 'sobreposta';
+  return 'disponivel';
 }
 function subPassaFiltrosNumericos(q, sub) {
   // Zona da PARTE (sub.zona), com fallback pra zona da quadra inteira —
@@ -5482,11 +5498,14 @@ function subPassaFiltrosNumericos(q, sub) {
   const zonaSub = sub.zona || q.zona;
   if (qfilters.zona!=='Todos' && zonaSub!==qfilters.zona) return false;
   if (sub.tipo === 'restrito') {
-    if (!RESTRICOES_OCULTAS.size) return true;
+    // Um pedaço restrito com lotes de status misturados (ex: um em Obras,
+    // outro Difícil) aparece se PELO MENOS UM dos status presentes
+    // estiver marcado pra mostrar — só some quando NENHUM estiver.
     const qidBase = q.id.split('-')[0];
-    const todosOcultos = sub.lotes.every(l => RESTRICOES_OCULTAS.has((STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status));
-    return !todosOcultos;
+    const statusPresentes = new Set(sub.lotes.map(l => (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status));
+    return [...statusPresentes].some(st => CATEGORIAS_VISIVEIS.has(st));
   }
+  if (!CATEGORIAS_VISIVEIS.has(categoriaDoSub(q, sub))) return false;
   // Composições vinculadas (ver iniciarModoVinculo): pra fins de filtro,
   // área/score/VGV usam o total combinado (mesmo critério já usado na
   // ficha) — senão uma vila dividida em duas partes pequenas nunca
@@ -7941,87 +7960,6 @@ function atualizarDashboardValidacaoAleSeAberto(){
   if (badge) badge.textContent = total ? ` (${total})` : '';
 }
 
-// ── Dashboard de Baixa Prioridade ──────────────────────────────────
-function construirDashboardBaixaPrioridade(){
-  const linhasBrutas = Object.values(BAIXA_PRIORIDADE_CACHE);
-
-  const jaAgrupadas = new Set();
-  const linhas = [];
-  linhasBrutas.forEach(l => {
-    if (jaAgrupadas.has(l.subId)) return;
-    const grupoVinc = grupoVinculoDoSubId(l.subId);
-    if (grupoVinc) {
-      const membrosDoGrupo = new Set(grupoVinc.membros.map(m => {
-        const subAtual = subAtualDoMembroVinculo(m);
-        return subAtual ? subAtual.subId : m.subId;
-      }));
-      const linhasDoGrupo = linhasBrutas.filter(x => membrosDoGrupo.has(x.subId));
-      linhasDoGrupo.forEach(x => jaAgrupadas.add(x.subId));
-      if (!linhasDoGrupo.length) return;
-      const area = linhasDoGrupo.reduce((s,x)=>s+(x.area||0),0);
-      const maisRecente = [...linhasDoGrupo].sort((a,b)=> new Date(b.dataMarcado)-new Date(a.dataMarcado))[0];
-      linhas.push({
-        ...maisRecente,
-        subId: linhasDoGrupo.map(x=>x.subId).join(' + '),
-        area,
-        _irParaQid: maisRecente.qid, _irParaSubId: maisRecente.subId, _irParaBairro: maisRecente.bairro,
-        vinculado: true,
-      });
-    } else {
-      jaAgrupadas.add(l.subId);
-      linhas.push({...l, _irParaQid: l.qid, _irParaSubId: l.subId, _irParaBairro: l.bairro});
-    }
-  });
-  linhas.sort((a,b) => new Date(b.dataMarcado) - new Date(a.dataMarcado));
-
-  const areaTotal = linhas.reduce((s,l)=>s+(l.area||0),0);
-  const cardsHtml = `
-    <div class="dash-cards">
-      <div class="dash-card"><div class="n">${linhas.length}</div><div class="l">Baixa prioridade</div></div>
-      <div class="dash-card"><div class="n">${(areaTotal/1000).toFixed(1)}k</div><div class="l">m² no total</div></div>
-    </div>`;
-
-  if (!linhas.length) {
-    return cardsHtml + '<div class="dash-vazio">Nenhuma composição marcada como baixa prioridade no momento.</div>';
-  }
-
-  const linhasHtml = linhas.map(l => `
-    <tr>
-      <td><strong>${l.subId}</strong>${l.vinculado?' <span style="font-size:9px;background:#f9a825;color:#6d4c00;border-radius:3px;padding:1px 5px">🔗 vinculadas</span>':''}</td>
-      <td>${l.bairro}</td>
-      <td>${(l.area||0).toLocaleString('pt-BR')} m²</td>
-      <td>${escapeHtmlHistorico(l.marcadoPor||'—')}</td>
-      <td>${formatarDataHistorico(l.dataMarcado)}</td>
-      <td style="display:flex;gap:4px">
-        <button class="dash-row-btn" onclick='irParaComposicaoDashboard("${l._irParaQid}","${l._irParaSubId}","${(l._irParaBairro||"").replace(/"/g,"&quot;")}")'>Ver composição</button>
-        <button class="dash-row-btn" style="border-color:#c62828;color:#c62828" onclick="removerBaixaPrioridade('${l._irParaSubId}').then(atualizarDashboardBaixaPrioridadeSeAberto)">Remover</button>
-      </td>
-    </tr>`).join('');
-
-  return cardsHtml + `
-    <table class="dash-table">
-      <thead><tr>
-        <th>Quadra</th><th>Bairro</th><th>Área</th><th>Marcado por</th><th>Em</th><th></th>
-      </tr></thead>
-      <tbody>${linhasHtml}</tbody>
-    </table>`;
-}
-function abrirDashboardBaixaPrioridade(){
-  document.getElementById('dash-bp-conteudo').innerHTML = construirDashboardBaixaPrioridade();
-  document.getElementById('dash-bp-overlay').classList.add('on');
-}
-function fecharDashboardBaixaPrioridade(){
-  document.getElementById('dash-bp-overlay').classList.remove('on');
-}
-function atualizarDashboardBaixaPrioridadeSeAberto(){
-  if (document.getElementById('dash-bp-overlay').classList.contains('on')) {
-    document.getElementById('dash-bp-conteudo').innerHTML = construirDashboardBaixaPrioridade();
-  }
-  const badge = document.getElementById('dash-bp-badge-count');
-  const total = Object.keys(BAIXA_PRIORIDADE_CACHE).length;
-  if (badge) badge.textContent = total ? ` (${total})` : '';
-}
-
 function abrirDashboardProspeccao(){
   document.getElementById('dash-conteudo').innerHTML = construirDashboardProspeccao();
   document.getElementById('dash-overlay').classList.add('on');
@@ -8120,18 +8058,17 @@ function iniciarApp(){
     loadPerimetrosLayer();
     atualizarContadorRegioes();
     applyFilters();
-    atualizarFiltroRestricoes(); // já chama applyQFilters() internamente — aplica de fato os checkboxes marcados por padrão (Operação Urbana, Obras, Não Edificável)
+    atualizarFiltroCategorias(); // já chama applyQFilters() internamente — aplica de fato os checkboxes marcados por padrão
     carregarCorretores();
     abrirDashboardProspeccao(); // toda vez que o sistema abre, mostra o resumo
     atualizarDashboardProspeccaoSeAberto();
     atualizarDashboardValidacaoAleSeAberto();
-    atualizarDashboardBaixaPrioridadeSeAberto();
     document.getElementById('carga-overlay').style.display = 'none';
   }).catch(() => {
     loadPerimetrosLayer();
     atualizarContadorRegioes();
     applyFilters();
-    atualizarFiltroRestricoes();
+    atualizarFiltroCategorias();
     document.getElementById('carga-overlay').style.display = 'none';
   });
 }
