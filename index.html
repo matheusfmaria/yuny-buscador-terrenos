@@ -532,8 +532,11 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     <button class="btn" id="btn-dashboard-prosp" onclick="abrirDashboardProspeccao()" style="position:relative">
       📊 Prospecções<span id="dash-badge-count"></span>
     </button>
-    <button class="btn" id="btn-dashboard-ale" onclick="abrirDashboardValidacaoAle()" style="position:relative;border-color:#4fc3f7;color:#0277bd">
+    <button class="btn" id="btn-dashboard-ale" onclick="abrirDashboardValidacaoAle()" style="position:relative;border-color:#fbc02d;color:#8d6e00">
       ✅ Validar com Ale<span id="dash-ale-badge-count"></span>
+    </button>
+    <button class="btn" id="btn-dashboard-baixa-prioridade" onclick="abrirDashboardBaixaPrioridade()" style="position:relative;border-color:#fb8c00;color:#e65100">
+      🔽 Baixa prioridade<span id="dash-bp-badge-count"></span>
     </button>
     <button class="btn btn-green" onclick="exportVisible()">⬇ Exportar</button>
     <button class="btn" onclick="exportarParaConsultaProprietarios()" title="Gera um .txt com o código de todos os lotes das composições que passam pelos filtros atuais, pronto pra usar com o script de consulta de proprietários">👤 Exportar p/ consulta de donos</button>
@@ -721,12 +724,14 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
 
     <div class="map-legend">
       <div class="lg-title">Composição</div>
-      <div class="lg-row"><div class="lg-dot" style="background:#2e7d32"></div> Score alto (≥ 72)</div>
-      <div class="lg-row"><div class="lg-dot" style="background:#f9a825"></div> Score médio (48–71)</div>
-      <div class="lg-row"><div class="lg-dot" style="background:#c62828"></div> Score baixo (&lt; 48)</div>
-      <div style="height:6px"></div>
-      <div class="lg-row"><div class="lg-dot" style="background:#8e24aa"></div> Empreendimento (GeoImóvel) / composição com empreendimento sobreposto</div>
-
+      <div class="lg-row"><div class="lg-dot" style="background:#1565c0"></div> Em prospecção</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#fbc02d"></div> Validar com o Ale</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#2e7d32"></div> Disponível</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#fb8c00"></div> Baixa prioridade</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#c62828"></div> Descarte ou lançamento futuro</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#8e24aa"></div> Sobreposta com lançamento (GeoImóvel)</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#8d6e63"></div> Difícil</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#9e9e9e"></div> Em obras ou não edificável</div>
     </div>
     <div class="map-info" id="map-info">🗺 Carregando...</div>
     <div id="sync-indicator" style="display:none;position:absolute;bottom:10px;left:10px;background:#fff;padding:5px 10px;border-radius:6px;font-size:11px;box-shadow:0 1px 4px rgba(0,0,0,.2);z-index:1000"></div>
@@ -892,6 +897,18 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     <div id="dash-ale-conteudo"></div>
     <div class="dash-footer">
       <button onclick="fecharDashboardValidacaoAle()">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── DASHBOARD DE BAIXA PRIORIDADE ────────────────────────────────── -->
+<div class="dash-overlay" id="dash-bp-overlay">
+  <div class="dash-modal">
+    <h3>🔽 Baixa prioridade</h3>
+    <div class="sub">Composições marcadas pra não trabalhar por enquanto.</div>
+    <div id="dash-bp-conteudo"></div>
+    <div class="dash-footer">
+      <button onclick="fecharDashboardBaixaPrioridade()">Fechar</button>
     </div>
   </div>
 </div>
@@ -2845,7 +2862,8 @@ function findSubById(subId, bairroHint) {
 // ofuscado diferente se houver algum "difícil" ou "futuro lançamento"
 const CORES_RESTRICAO = {
   obras: '#9e9e9e', naoedificavel: '#9e9e9e',
-  dificil: '#8d6e63', futuro: '#8d6e63', descarte: '#8d6e63',
+  dificil: '#8d6e63',
+  futuro: '#c62828', descarte: '#c62828',
   retirado_prospeccao: '#78909c',
 };
 const LABEL_RESTRICAO = {
@@ -3170,6 +3188,12 @@ function corComposicao(key, corBase, lotesAtuais){
   if (validacao && (!lotesAtuais || lotesAtuais.every(l => validacao.lotes.includes(l)))) {
     return COR_VALIDACAO_ALE;
   }
+  // "Baixa prioridade" vem depois — some se a composição já estiver em
+  // prospecção ou aguardando validação, que são estados mais urgentes.
+  const baixaPrioridade = BAIXA_PRIORIDADE_CACHE[key];
+  if (baixaPrioridade && (!lotesAtuais || lotesAtuais.every(l => baixaPrioridade.lotes.includes(l)))) {
+    return COR_BAIXA_PRIORIDADE;
+  }
   return corBase;
 }
 
@@ -3308,7 +3332,7 @@ async function repararProspeccoesAposUnificacao(){
 // precisa ser validada com o gestor antes de seguir pra prospecção de
 // verdade. Não interfere em nada mais na composição — só muda a cor no
 // mapa (destaque próprio) e aparece numa lista separada.
-const COR_VALIDACAO_ALE = '#4fc3f7';
+const COR_VALIDACAO_ALE = '#fbc02d';
 let VALIDACAO_ALE_CACHE = {}; // subId -> {subId, qid, bairro, lotes, area, dataMarcado, marcadoPor}
 
 function iniciarSincronizacaoValidacaoAle(){
@@ -3382,6 +3406,86 @@ async function toggleValidacaoAleUI(qidBase, subId, bairro, lotes, area){
       marcadoPor: (_usuarioAtual && (_usuarioAtual.displayName || _usuarioAtual.email)) || '',
     });
     mostrarToast('Composição marcada para validar com o Ale.');
+  }
+  if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
+}
+
+// ── Baixa prioridade ───────────────────────────────────────────────
+// Mesma mecânica de "Validar com o Ale" — marcação simples, sem
+// corretor/e-mail, pra sinalizar que uma composição não vai ser
+// trabalhada por enquanto. Também não interfere em mais nada na
+// composição, só a cor no mapa e uma lista separada.
+const COR_BAIXA_PRIORIDADE = '#fb8c00';
+let BAIXA_PRIORIDADE_CACHE = {}; // subId -> {subId, qid, bairro, lotes, area, dataMarcado, marcadoPor}
+
+function iniciarSincronizacaoBaixaPrioridade(){
+  return new Promise((resolve) => {
+    if (!_fbAtivo) { resolve(); return; }
+    let primeira = true;
+    _fbDb.ref('baixa_prioridade_status').on('value', snapshot => {
+      const dados = snapshot.val() || {};
+      const novo = {};
+      Object.values(dados).forEach(v => { if (v && v.subId) novo[v.subId] = v; });
+      BAIXA_PRIORIDADE_CACHE = novo;
+      if (primeira) { primeira = false; resolve(); }
+      else {
+        renderQuadraMarkers(); renderQuadraList();
+        if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
+        atualizarDashboardBaixaPrioridadeSeAberto();
+      }
+    }, err => { avisarErroSincronizacao('baixa_prioridade_status', err); primeira=false; resolve(); });
+  });
+}
+
+async function marcarBaixaPrioridade(subId, dados, _pulandoPropagacao){
+  BAIXA_PRIORIDADE_CACHE[subId] = dados; // otimista
+  if (_fbAtivo) {
+    try { await _fbDb.ref('baixa_prioridade_status/'+sqlToFbKey(subId)).set(dados); }
+    catch(e) { console.warn('Não foi possível salvar a marcação de baixa prioridade:', e); }
+  }
+  if (!_pulandoPropagacao) {
+    const grupo = grupoVinculoDoSubId(subId);
+    if (grupo) {
+      for (const membro of grupo.membros) {
+        const subMembro = subAtualDoMembroVinculo(membro);
+        if (!subMembro || subMembro.subId === subId) continue;
+        await marcarBaixaPrioridade(subMembro.subId,
+          {...dados, subId: subMembro.subId, qid: subMembro.parentId, bairro: membro.bairro, lotes: subMembro.lotes, area: subMembro.area},
+          true);
+      }
+    }
+  }
+}
+
+async function removerBaixaPrioridade(subId, _pulandoPropagacao){
+  delete BAIXA_PRIORIDADE_CACHE[subId]; // otimista
+  if (_fbAtivo) {
+    try { await _fbDb.ref('baixa_prioridade_status/'+sqlToFbKey(subId)).remove(); }
+    catch(e) { console.warn('Não foi possível remover a marcação de baixa prioridade:', e); }
+  }
+  if (!_pulandoPropagacao) {
+    const grupo = grupoVinculoDoSubId(subId);
+    if (grupo) {
+      for (const membro of grupo.membros) {
+        const subMembro = subAtualDoMembroVinculo(membro);
+        const subIdAtual = subMembro ? subMembro.subId : membro.subId;
+        if (subIdAtual !== subId && BAIXA_PRIORIDADE_CACHE[subIdAtual]) {
+          await removerBaixaPrioridade(subIdAtual, true);
+        }
+      }
+    }
+  }
+}
+async function toggleBaixaPrioridadeUI(qidBase, subId, bairro, lotes, area){
+  if (BAIXA_PRIORIDADE_CACHE[subId]) {
+    await removerBaixaPrioridade(subId);
+    mostrarToast('Marcação de baixa prioridade removida.');
+  } else {
+    await marcarBaixaPrioridade(subId, {
+      subId, qid: qidBase, bairro, lotes, area, dataMarcado: new Date().toISOString(),
+      marcadoPor: (_usuarioAtual && (_usuarioAtual.displayName || _usuarioAtual.email)) || '',
+    });
+    mostrarToast('Composição marcada como baixa prioridade.');
   }
   if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
 }
@@ -4612,7 +4716,6 @@ function iniciarCapturaMapa(){
     ativas: nomes.filter(n => layers[n] && map.hasLayer(layers[n])),
     tinhaLotes: !!(lotesLayer && map.hasLayer(lotesLayer)),
     tinhaBusca: !!(typeof searchMarker !== 'undefined' && searchMarker && map.hasLayer(searchMarker)),
-    tinhaLoteGeosampa: !!(layers.loteGeosampa && map.hasLayer(layers.loteGeosampa)),
   };
 
   // Tira do mapa TUDO que não é a composição em análise
@@ -4620,22 +4723,36 @@ function iniciarCapturaMapa(){
   if (_captura.tinhaLotes) map.removeLayer(lotesLayer);       // some também com os nºs dos lotes
   if (_captura.tinhaBusca) map.removeLayer(searchMarker);
 
-  // Lotes oficiais do GeoSampa aparecem de fundo durante a captura — ajuda
-  // o corretor a identificar os lotes na imagem que vai por e-mail, mesmo
-  // que essa camada não estivesse ativa no uso normal do mapa. Marca o
-  // checkbox também, pra UI não ficar inconsistente com o que se vê.
-  if (layers.loteGeosampa && !map.hasLayer(layers.loteGeosampa)) {
-    layers.loteGeosampa.addTo(map);
-    const cbGeosampa = document.getElementById('ly-loteGeosampa');
-    if (cbGeosampa) cbGeosampa.checked = true;
-  }
-
   // Desenha só a composição, em ciano Yuny, sem rótulo nenhum.
   // Renderer canvas (em vez do SVG padrão) porque canvas é copiável
   // pixel a pixel na hora de montar a imagem final.
   const rend = L.canvas({padding:0.6});
   const grupo = L.featureGroup().addTo(map);
   _captura.layer = grupo;
+
+  // Contornos de TODOS os lotes da quadra, em cinza fino, por baixo da
+  // composição — ajuda o corretor a identificar os lotes individuais na
+  // imagem. Usa a MESMA geometria vetorial (LOTES_GEOM) já usada pra
+  // desenhar a composição, em vez da camada WMS "Lotes oficiais
+  // (GeoSampa)": aquela é uma imagem vinda de outro servidor, que não
+  // libera CORS — aparece bem na tela ao vivo, mas o navegador impede de
+  // "copiar" esses pixels pra dentro da imagem final (tanto no método
+  // manual quanto no html2canvas), então nunca ia sair no e-mail mesmo
+  // que a gente esperasse ela carregar. Desenhando com dados que já
+  // temos, sem depender de nenhum servidor externo na hora da captura,
+  // o contorno sai corretamente na imagem.
+  function _desenharLotesDeFundoNaCaptura(qQuadra, qidBaseDesenho){
+    if (!qQuadra) return;
+    qQuadra.lotes.forEach(l => {
+      const ring = LOTES_GEOM[`${qidBaseDesenho}.${l}`];
+      if (!ring || ring.length < 3) return;
+      L.polygon(ring.map(c=>[c[1],c[0]]), {
+        renderer: rend, color: '#78502e', weight: 1, opacity: 0.6,
+        fill: false, interactive: false
+      }).addTo(grupo);
+    });
+  }
+  _desenharLotesDeFundoNaCaptura(q, qidBase);
 
   function _desenharComposicaoNaCaptura(qidBaseDesenho, lotesDesenho){
     lotesDesenho.forEach(l => {
@@ -4666,7 +4783,12 @@ function iniciarCapturaMapa(){
     const outrosMembros = grupoVincCaptura.membros.filter(m => !_membroEhAComposicao(m, sub.subId));
     outrosMembros.forEach(m => {
       const subM = subAtualDoMembroVinculo(m);
-      if (subM) _desenharComposicaoNaCaptura(subM.parentId.split('-')[0], subM.lotes);
+      if (subM) {
+        const qidBaseM = subM.parentId.split('-')[0];
+        const qM = QUADRAS.find(x => x.id === subM.parentId && x.bairro === m.bairro);
+        _desenharLotesDeFundoNaCaptura(qM, qidBaseM);
+        _desenharComposicaoNaCaptura(qidBaseM, subM.lotes);
+      }
     });
     const statsV = statsVinculo(grupoVincCaptura.grupoId);
     if (statsV) tituloCaptura = `${statsV.detalhes.length} composições vinculadas · ${statsV.area.toLocaleString('pt-BR')} m²`;
@@ -4718,13 +4840,6 @@ function sairModoCaptura(voltarAoModal){
     _captura.ativas.forEach(n => { if (layers[n]) layers[n].addTo(map); });
     if (_captura.tinhaLotes && lotesLayer) lotesLayer.addTo(map);
     if (_captura.tinhaBusca && typeof searchMarker !== 'undefined' && searchMarker) searchMarker.addTo(map);
-    // Volta a camada de lotes oficiais ao estado de antes de entrar na
-    // captura — só tira se ela não estava ativa originalmente.
-    if (!_captura.tinhaLoteGeosampa && layers.loteGeosampa && map.hasLayer(layers.loteGeosampa)) {
-      map.removeLayer(layers.loteGeosampa);
-      const cbGeosampa = document.getElementById('ly-loteGeosampa');
-      if (cbGeosampa) cbGeosampa.checked = false;
-    }
     const {center, zoom} = _captura;
     _captura = null;
     setTimeout(()=>{ map.invalidateSize(); map.setView(center, zoom); }, 80);
@@ -5431,6 +5546,12 @@ function negSc(n) {
   return Math.max(NEG_FLOOR, Math.round(val));
 }
 
+// Cor "chapada" (sem escala) pra composições disponíveis no mapa — pedido
+// do Matheus: a escala verde-vermelho de score deixava o mapa poluído sem
+// agregar muito visualmente. O score continua calculado e aparecendo na
+// ficha normalmente (scoreColor() abaixo ainda é usada lá); só a cor do
+// MAPA deixou de refletir o score.
+const COR_DISPONIVEL = '#2e7d32';
 function scoreColor(score) {
   if(score>=72) return '#2e7d32';
   if(score>=55) return '#689f38';
@@ -5868,7 +5989,7 @@ function renderQuadraMarkers() {
       // 27 originais). Só cai pra união ao vivo dos lotes se, por algum
       // motivo, a composição não tiver entrada em GEOM_MAP (não deveria
       // acontecer, mas mantém o fallback por segurança).
-      const corBase = temEmpreendimentoSobreposto(q.id.split('-')[0], subs[0].lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(subs[0].score);
+      const corBase = temEmpreendimentoSobreposto(q.id.split('-')[0], subs[0].lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : COR_DISPONIVEL;
       const c=corComposicao(q.id, corBase, subs[0].lotes);
       const sel=estaSelecionadoOuVinculado(q.id, q.bairro);
       let layer;
@@ -5909,7 +6030,7 @@ function renderQuadraMarkers() {
     subs.forEach(sub=>{
       if (!subPassaFiltrosNumericos(q, sub)) return;
       const restrito = sub.tipo==='restrito' && sub.statusRestricao!=='retirado_prospeccao';
-      const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(sub.score);
+      const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : COR_DISPONIVEL;
       const c = corComposicao(sub.subId, restrito ? corComposicaoRestrita(qidBase, sub.lotes) : corBaseAtivo, sub.lotes);
       const sel=estaSelecionadoOuVinculado(sub.subId, q.bairro);
       const unioned = unionLotesPolygonCached(qidBase, sub.lotes);
@@ -6400,50 +6521,42 @@ function encerrarMedicao(){
 }
 
 // Integração com o LandBank da Kamila (https://nnyuny.github.io/Yuny.terrenos/)
-// — abre o cadastro de "Novo Terreno" já preenchido, sem precisar digitar
-// nada de novo lá. Reaproveita o que o Buscador já calcula pra cada
-// composição: endereço de referência (geocodificação reversa), centro
-// geométrico, dados combinados de vínculo (quando existir) e o corretor
-// já em prospecção (se houver).
-//
-// window.open('', '_blank') ANTES de qualquer await: é isso que evita o
-// bloqueador de pop-up do navegador — chamado assim, síncrono, dentro do
-// clique, o navegador entende que foi o usuário que pediu. Se a busca de
-// endereço rodasse antes do primeiro open(), o navegador bloquearia por
-// não parecer mais uma ação direta do clique.
-async function enviarProLandBank(qid, subId, bairroHint){
-  const janela = window.open('', '_blank');
+// — abre o cadastro de "Novo Terreno" já preenchido. Segue o formato dela
+// EXATAMENTE como especificado e testado por ela (window.open direto,
+// síncrono, com a URL já pronta) — uma versão anterior fazia uma busca de
+// endereço (assíncrona) ANTES de montar a URL, o que atrasava o
+// window.open e parece ter sido a causa do link abrir mas não preencher
+// nada. Removida essa espera: o botão agora monta e abre o link na hora,
+// sem depender de nenhuma resposta de rede primeiro.
+function enviarProLandBank(qid, subId, bairroHint){
   const q = (bairroHint && QUADRAS.find(x=>x.id===qid && x.bairro===bairroHint)) || QUADRAS.find(x=>x.id===qid);
-  if (!q) { if (janela) janela.close(); return; }
+  if (!q) return;
   const subs = getSubGroups(q);
   const sub = subs.find(s=>s.subId===subId) || subs[0];
-  if (!sub) { if (janela) janela.close(); return; }
+  if (!sub) return;
 
   const qidBase = q.id.split('-')[0];
   const combo = statsCombinadoParaFicha(sub.subId, q, currentProfile==='compacto');
-  // Composições vinculadas mandam TODOS os lotes de todas as partes —
-  // mesmo princípio já usado no e-mail de prospecção.
   const gruposLotes = combo ? combo.gruposLotes : [{qidBase, lotes: sub.lotes}];
   const sqls = gruposLotes.flatMap(g => g.lotes.map(l => sqlComDigito(`${g.qidBase}.${l}`)));
   const area = Math.round(combo ? combo.area : sub.area);
-
-  const centro = centroDaComposicao(qidBase, sub);
-  const endereco = centro ? await buscarEnderecoReferencia(centro.lat, centro.lon) : null;
   const dadosProsp = PROSPECCAO_STATUS_CACHE[sub.subId];
   const corretor = dadosProsp ? dadosProsp.corretor : '';
 
   const p = new URLSearchParams();
-  if (endereco) p.set('endereco', endereco);
   p.set('bairro', q.bairro);
   p.set('area', String(area));
-  sqls.forEach(s => p.append('sql', s)); // várias ocorrências de "sql" — o formulário dela tem uma tabela de lotes, não um campo único
+  // O formulário dela foi especificado/testado com "sql" como valor ÚNICO
+  // (não uma lista) — manda o primeiro/principal lote nesse campo, e a
+  // lista completa (quando há mais de um lote) fica registrada na
+  // observação, pra nada se perder mesmo que ela só leia um SQL.
+  if (sqls.length) p.set('sql', sqls[0]);
   if (corretor) p.set('corretor', corretor);
-  p.set('obs', `Quadra fiscal ${formatarQidExibicao(qidBase)} · ${sqls.length} lote(s) via Buscador de Terrenos${combo?' (composição combinada c/ vínculo)':''}`);
+  const obsLotes = sqls.length > 1 ? ` — Todos os lotes: ${sqls.join(', ')}` : '';
+  p.set('obs', `Quadra fiscal ${formatarQidExibicao(qidBase)} · ${sqls.length} lote(s) via Buscador de Terrenos${combo?' (composição combinada c/ vínculo)':''}${obsLotes}`);
   p.set('fonte', 'matheus');
 
-  const url = 'https://nnyuny.github.io/Yuny.terrenos/#novoterreno&' + p.toString();
-  if (janela && !janela.closed) janela.location.href = url;
-  else window.open(url, '_blank'); // navegador bloqueou o open() inicial — tenta de novo mesmo assim
+  window.open('https://nnyuny.github.io/Yuny.terrenos/#novoterreno&' + p.toString(), '_blank');
 }
 function abrirGoogleMaps(lat, lon){
   window.open(`https://www.google.com/maps/search/?api=1&query=${lat},${lon}`, '_blank');
@@ -6767,7 +6880,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       const qidBaseLayer = st.parentId.split('-')[0];
       const corBase = (st.tipo==='restrito' && st.statusRestricao!=='retirado_prospeccao')
         ? corComposicaoRestrita(qidBaseLayer, st.lotes)
-        : (temEmpreendimentoSobreposto(qidBaseLayer, st.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : scoreColor(st.score));
+        : (temEmpreendimentoSobreposto(qidBaseLayer, st.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : COR_DISPONIVEL);
       const _c= corComposicao(layer._yunySubId, corBase, st.lotes);
       const _sel = estaSelecionadoOuVinculado(layer._yunySubId, layer._yunyBairro);
       const _style={color:_c,weight:_sel?2.5:1.5,fillColor:_c,fillOpacity:_sel?0.55:0.3,dashArray:_sel?null:'3,2'};
@@ -6838,6 +6951,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <button class="act-btn" style="background:#5c2d91;color:#fff" onclick='enviarProLandBank("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📤 Enviar pro LandBank</button>
       <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção</button>
       <button class="act-btn" style="border-color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#90a4ae'};color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#607d8b'}" onclick='toggleValidacaoAleUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${VALIDACAO_ALE_CACHE[_stats.subId]?"↩️ Remover validação com o Ale":"✅ Validar com o Ale"}</button>
+      <button class="act-btn" style="border-color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#90a4ae'};color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#607d8b'}" onclick='toggleBaixaPrioridadeUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${BAIXA_PRIORIDADE_CACHE[_stats.subId]?"↩️ Remover baixa prioridade":"🔽 Baixa prioridade"}</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
     ${(() => {
@@ -6883,6 +6997,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <button class="act-btn" style="background:#5c2d91;color:#fff" onclick='enviarProLandBank("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📤 Enviar pro LandBank</button>
       <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção</button>
       <button class="act-btn" style="border-color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#90a4ae'};color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#607d8b'}" onclick='toggleValidacaoAleUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${VALIDACAO_ALE_CACHE[_stats.subId]?"↩️ Remover validação com o Ale":"✅ Validar com o Ale"}</button>
+      <button class="act-btn" style="border-color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#90a4ae'};color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#607d8b'}" onclick='toggleBaixaPrioridadeUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${BAIXA_PRIORIDADE_CACHE[_stats.subId]?"↩️ Remover baixa prioridade":"🔽 Baixa prioridade"}</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
     </div>
     ${(() => {
@@ -7814,6 +7929,87 @@ function atualizarDashboardValidacaoAleSeAberto(){
   if (badge) badge.textContent = total ? ` (${total})` : '';
 }
 
+// ── Dashboard de Baixa Prioridade ──────────────────────────────────
+function construirDashboardBaixaPrioridade(){
+  const linhasBrutas = Object.values(BAIXA_PRIORIDADE_CACHE);
+
+  const jaAgrupadas = new Set();
+  const linhas = [];
+  linhasBrutas.forEach(l => {
+    if (jaAgrupadas.has(l.subId)) return;
+    const grupoVinc = grupoVinculoDoSubId(l.subId);
+    if (grupoVinc) {
+      const membrosDoGrupo = new Set(grupoVinc.membros.map(m => {
+        const subAtual = subAtualDoMembroVinculo(m);
+        return subAtual ? subAtual.subId : m.subId;
+      }));
+      const linhasDoGrupo = linhasBrutas.filter(x => membrosDoGrupo.has(x.subId));
+      linhasDoGrupo.forEach(x => jaAgrupadas.add(x.subId));
+      if (!linhasDoGrupo.length) return;
+      const area = linhasDoGrupo.reduce((s,x)=>s+(x.area||0),0);
+      const maisRecente = [...linhasDoGrupo].sort((a,b)=> new Date(b.dataMarcado)-new Date(a.dataMarcado))[0];
+      linhas.push({
+        ...maisRecente,
+        subId: linhasDoGrupo.map(x=>x.subId).join(' + '),
+        area,
+        _irParaQid: maisRecente.qid, _irParaSubId: maisRecente.subId, _irParaBairro: maisRecente.bairro,
+        vinculado: true,
+      });
+    } else {
+      jaAgrupadas.add(l.subId);
+      linhas.push({...l, _irParaQid: l.qid, _irParaSubId: l.subId, _irParaBairro: l.bairro});
+    }
+  });
+  linhas.sort((a,b) => new Date(b.dataMarcado) - new Date(a.dataMarcado));
+
+  const areaTotal = linhas.reduce((s,l)=>s+(l.area||0),0);
+  const cardsHtml = `
+    <div class="dash-cards">
+      <div class="dash-card"><div class="n">${linhas.length}</div><div class="l">Baixa prioridade</div></div>
+      <div class="dash-card"><div class="n">${(areaTotal/1000).toFixed(1)}k</div><div class="l">m² no total</div></div>
+    </div>`;
+
+  if (!linhas.length) {
+    return cardsHtml + '<div class="dash-vazio">Nenhuma composição marcada como baixa prioridade no momento.</div>';
+  }
+
+  const linhasHtml = linhas.map(l => `
+    <tr>
+      <td><strong>${l.subId}</strong>${l.vinculado?' <span style="font-size:9px;background:#f9a825;color:#6d4c00;border-radius:3px;padding:1px 5px">🔗 vinculadas</span>':''}</td>
+      <td>${l.bairro}</td>
+      <td>${(l.area||0).toLocaleString('pt-BR')} m²</td>
+      <td>${escapeHtmlHistorico(l.marcadoPor||'—')}</td>
+      <td>${formatarDataHistorico(l.dataMarcado)}</td>
+      <td style="display:flex;gap:4px">
+        <button class="dash-row-btn" onclick='irParaComposicaoDashboard("${l._irParaQid}","${l._irParaSubId}","${(l._irParaBairro||"").replace(/"/g,"&quot;")}")'>Ver composição</button>
+        <button class="dash-row-btn" style="border-color:#c62828;color:#c62828" onclick="removerBaixaPrioridade('${l._irParaSubId}').then(atualizarDashboardBaixaPrioridadeSeAberto)">Remover</button>
+      </td>
+    </tr>`).join('');
+
+  return cardsHtml + `
+    <table class="dash-table">
+      <thead><tr>
+        <th>Quadra</th><th>Bairro</th><th>Área</th><th>Marcado por</th><th>Em</th><th></th>
+      </tr></thead>
+      <tbody>${linhasHtml}</tbody>
+    </table>`;
+}
+function abrirDashboardBaixaPrioridade(){
+  document.getElementById('dash-bp-conteudo').innerHTML = construirDashboardBaixaPrioridade();
+  document.getElementById('dash-bp-overlay').classList.add('on');
+}
+function fecharDashboardBaixaPrioridade(){
+  document.getElementById('dash-bp-overlay').classList.remove('on');
+}
+function atualizarDashboardBaixaPrioridadeSeAberto(){
+  if (document.getElementById('dash-bp-overlay').classList.contains('on')) {
+    document.getElementById('dash-bp-conteudo').innerHTML = construirDashboardBaixaPrioridade();
+  }
+  const badge = document.getElementById('dash-bp-badge-count');
+  const total = Object.keys(BAIXA_PRIORIDADE_CACHE).length;
+  if (badge) badge.textContent = total ? ` (${total})` : '';
+}
+
 function abrirDashboardProspeccao(){
   document.getElementById('dash-conteudo').innerHTML = construirDashboardProspeccao();
   document.getElementById('dash-overlay').classList.add('on');
@@ -7844,7 +8040,11 @@ function atualizarDashboardProspeccaoSeAberto(){
 // — sem o bairro, selectQuadra pegava a primeira da lista e levava pra
 // composição errada, em outro lugar da cidade.
 function irParaComposicaoDashboard(qid, subId, bairro){
-  fecharDashboardProspeccao();
+  // Fecha QUALQUER dashboard aberto (prospecção, validar com Ale, baixa
+  // prioridade, ou outro que venha a existir) — antes só fechava o de
+  // prospecção, então "Ver composição" clicado a partir dos outros
+  // dashboards deixava o quadro aberto por cima, atrapalhando a visão.
+  document.querySelectorAll('.dash-overlay.on').forEach(el => el.classList.remove('on'));
   if (window.innerWidth<=768) toggleSidebarMobile(false);
   selectQuadra(qid, subId, false, bairro);
 }
@@ -7884,7 +8084,7 @@ function iniciarApp(){
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
   const numDistritosIniciais = DISTRITOS_DISPONIVEIS.filter(d => DISTRITOS_INICIAIS.includes(d.distrito)).length;
-  _resetProgressoCarga(numDistritosIniciais + 10); // 10 = as outras tarefas do Promise.all abaixo
+  _resetProgressoCarga(numDistritosIniciais + 11); // 11 = as outras tarefas do Promise.all abaixo
 
   Promise.all([
     _comProgressoCarga(iniciarSincronizacaoLotes(), 'Sincronizando restrições…'),
@@ -7895,6 +8095,7 @@ function iniciarApp(){
     _comProgressoCarga(iniciarSincronizacaoEmpreendimentoIgnorado(), 'Sincronizando empreendimentos ignorados…'),
     _comProgressoCarga(iniciarSincronizacaoVinculos(), 'Sincronizando vínculos…'),
     _comProgressoCarga(iniciarSincronizacaoValidacaoAle(), 'Sincronizando validações…'),
+    _comProgressoCarga(iniciarSincronizacaoBaixaPrioridade(), 'Sincronizando baixa prioridade…'),
     _comProgressoCarga(carregarItbiComparaveis(), 'Carregando comparáveis de ITBI…'),
     _comProgressoCarga(carregarProprietarios(), 'Carregando nomes de proprietários…'),
     carregarDistritosIniciais(),
@@ -7912,6 +8113,7 @@ function iniciarApp(){
     abrirDashboardProspeccao(); // toda vez que o sistema abre, mostra o resumo
     atualizarDashboardProspeccaoSeAberto();
     atualizarDashboardValidacaoAleSeAberto();
+    atualizarDashboardBaixaPrioridadeSeAberto();
     document.getElementById('carga-overlay').style.display = 'none';
   }).catch(() => {
     loadPerimetrosLayer();
