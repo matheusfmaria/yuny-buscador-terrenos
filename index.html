@@ -726,7 +726,8 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <div class="lg-title">Composição</div>
       <div class="lg-row"><div class="lg-dot" style="background:#1565c0"></div> Em prospecção</div>
       <div class="lg-row"><div class="lg-dot" style="background:#fbc02d"></div> Validar com o Ale</div>
-      <div class="lg-row"><div class="lg-dot" style="background:#2e7d32"></div> Disponível</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#2e7d32"></div> Disponível — CA ≥ 4</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#81c784"></div> Disponível — CA &lt; 4</div>
       <div class="lg-row"><div class="lg-dot" style="background:#fb8c00"></div> Baixa prioridade</div>
       <div class="lg-row"><div class="lg-dot" style="background:#c62828"></div> Descarte ou lançamento futuro</div>
       <div class="lg-row"><div class="lg-dot" style="background:#8e24aa"></div> Sobreposta com lançamento (GeoImóvel)</div>
@@ -5551,7 +5552,17 @@ function negSc(n) {
 // agregar muito visualmente. O score continua calculado e aparecendo na
 // ficha normalmente (scoreColor() abaixo ainda é usada lá); só a cor do
 // MAPA deixou de refletir o score.
-const COR_DISPONIVEL = '#2e7d32';
+//
+// Dentro do "disponível", duas tonalidades pelo CA efetivo (o mesmo número
+// que já aparece na ficha como "CA efetivo") — verde escuro pra quem tem
+// mais potencial construtivo (CA ≥ 4), verde claro pro resto. Ajuda a
+// notar de cara, sem abrir a ficha, quais terrenos valem mais a pena olhar
+// primeiro.
+const COR_DISPONIVEL_CA_ALTO = '#2e7d32';
+const COR_DISPONIVEL_CA_BAIXO = '#81c784';
+function corDisponivelPorCA(zona, ou){
+  return caEfetivo(zona, ou) >= 4 ? COR_DISPONIVEL_CA_ALTO : COR_DISPONIVEL_CA_BAIXO;
+}
 function scoreColor(score) {
   if(score>=72) return '#2e7d32';
   if(score>=55) return '#689f38';
@@ -5989,7 +6000,7 @@ function renderQuadraMarkers() {
       // 27 originais). Só cai pra união ao vivo dos lotes se, por algum
       // motivo, a composição não tiver entrada em GEOM_MAP (não deveria
       // acontecer, mas mantém o fallback por segurança).
-      const corBase = temEmpreendimentoSobreposto(q.id.split('-')[0], subs[0].lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : COR_DISPONIVEL;
+      const corBase = temEmpreendimentoSobreposto(q.id.split('-')[0], subs[0].lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : corDisponivelPorCA(subs[0].zona || q.zona, q.ou);
       const c=corComposicao(q.id, corBase, subs[0].lotes);
       const sel=estaSelecionadoOuVinculado(q.id, q.bairro);
       let layer;
@@ -6030,7 +6041,7 @@ function renderQuadraMarkers() {
     subs.forEach(sub=>{
       if (!subPassaFiltrosNumericos(q, sub)) return;
       const restrito = sub.tipo==='restrito' && sub.statusRestricao!=='retirado_prospeccao';
-      const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : COR_DISPONIVEL;
+      const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : corDisponivelPorCA(sub.zona || q.zona, q.ou);
       const c = corComposicao(sub.subId, restrito ? corComposicaoRestrita(qidBase, sub.lotes) : corBaseAtivo, sub.lotes);
       const sel=estaSelecionadoOuVinculado(sub.subId, q.bairro);
       const unioned = unionLotesPolygonCached(qidBase, sub.lotes);
@@ -6878,9 +6889,10 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     const st=findSubById(layer._yunySubId, layer._yunyBairro);
     if (st) {
       const qidBaseLayer = st.parentId.split('-')[0];
+      const qLayer = QUADRAS.find(x => x.id === st.parentId && x.bairro === layer._yunyBairro) || QUADRAS.find(x => x.id === st.parentId);
       const corBase = (st.tipo==='restrito' && st.statusRestricao!=='retirado_prospeccao')
         ? corComposicaoRestrita(qidBaseLayer, st.lotes)
-        : (temEmpreendimentoSobreposto(qidBaseLayer, st.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : COR_DISPONIVEL);
+        : (temEmpreendimentoSobreposto(qidBaseLayer, st.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : corDisponivelPorCA(st.zona || (qLayer && qLayer.zona), qLayer && qLayer.ou));
       const _c= corComposicao(layer._yunySubId, corBase, st.lotes);
       const _sel = estaSelecionadoOuVinculado(layer._yunySubId, layer._yunyBairro);
       const _style={color:_c,weight:_sel?2.5:1.5,fillColor:_c,fillOpacity:_sel?0.55:0.3,dashArray:_sel?null:'3,2'};
