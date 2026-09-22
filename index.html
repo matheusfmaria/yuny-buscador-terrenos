@@ -54,6 +54,7 @@ body{display:flex;flex-direction:column;height:100vh;color:#1a1a1a}
 .tab-content.on{display:flex}
 
 .filters{padding:10px 12px;border-bottom:1px solid #eee;overflow-y:auto;flex:1 1 50%;min-height:0}
+.filters.oculto{display:none}
 /* Metade de baixo: agrupa contador + ordenação + lista, ocupando os outros
    50% da sidebar. A lista rola dentro dessa metade — nunca fica espremida
    pelos filtros de cima, que agora têm seu próprio limite de altura. */
@@ -95,7 +96,13 @@ body{display:flex;flex-direction:column;height:100vh;color:#1a1a1a}
 #map{width:100%;height:100%}
 
 /* LAYER CONTROLS */
-.layer-ctrl{position:absolute;top:48px;right:10px;z-index:999;background:#fff;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:11px;min-width:150px}
+.layer-ctrl{position:absolute;top:48px;right:10px;z-index:999;background:#fff;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:11px;min-width:150px;display:none}
+.layer-ctrl.mobile-open{display:block}
+/* Ponto arrastável da régua de medição — bolinha laranja com borda
+   branca, igual ao visual anterior (circleMarker), mas agora com
+   L.marker por baixo pra poder arrastar. */
+.regua-ponto{width:14px;height:14px;border-radius:50%;background:#e65100;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.4);cursor:grab}
+.regua-ponto:active{cursor:grabbing}
 .layer-ctrl-title{font-weight:600;color:#555;margin-bottom:6px;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
 .layer-row{display:flex;align-items:center;gap:7px;margin-bottom:5px;cursor:pointer}
 .layer-row:last-child{margin-bottom:0}
@@ -103,15 +110,19 @@ body{display:flex;flex-direction:column;height:100vh;color:#1a1a1a}
 .layer-row label{color:#444;cursor:pointer;user-select:none}
 .loading-badge{font-size:10px;color:#f9a825;margin-left:4px}
 
-.map-legend{position:absolute;bottom:28px;left:10px;z-index:999;background:#fff;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:11px}
+.map-legend{position:absolute;bottom:28px;left:10px;z-index:999;background:#fff;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:11px;display:none}
+.map-legend.open{display:block}
 .lg-title{font-weight:600;color:#555;margin-bottom:5px;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
 .lg-row{display:flex;align-items:center;gap:6px;color:#666;margin-bottom:3px}
 .lg-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 .lg-rect{width:16px;height:8px;border-radius:2px;flex-shrink:0}
 .map-info{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:999;background:#fff;border:1px solid #ddd;border-radius:20px;padding:5px 14px;font-size:11px;color:#555;pointer-events:none;white-space:nowrap}
 
-/* DETAIL PANEL */
-.detail{width:310px;min-width:310px;background:#fff;border-left:1px solid #e0e0e0;overflow-y:auto;display:flex;flex-direction:column}
+/* DETAIL PANEL — oculta por padrão (pedido do Matheus: só abre ao
+   clicar), independente do tamanho de tela. Antes, no desktop, uma regra
+   à parte forçava ela a aparecer sempre; removida. */
+.detail{width:310px;min-width:310px;background:#fff;border-left:1px solid #e0e0e0;overflow-y:auto;display:none;flex-direction:column}
+.detail.visible{display:flex}
 .dp-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 16px;text-align:center;color:#aaa}
 .dp-hd{padding:12px 14px 8px;border-bottom:1px solid #eee}
 .dp-sql{font-size:13px;font-weight:600;color:#1a1a1a;margin-bottom:3px}
@@ -145,6 +156,7 @@ body{display:flex;flex-direction:column;height:100vh;color:#1a1a1a}
 .sidebar-mobile-hd{display:none}
 .layer-ctrl-close{display:none}
 .mobile-fab{display:none}
+.painel-toggle-desktop{display:inline-block}
 .minmax-row{display:flex;align-items:center;gap:6px;margin-bottom:10px}
 .minmax-row input{width:100%;min-width:0;border:1px solid #d0d0d0;border-radius:5px;
   padding:5px 7px;font-size:12px;font-family:inherit;color:#1a1a1a}
@@ -153,6 +165,7 @@ body{display:flex;flex-direction:column;height:100vh;color:#1a1a1a}
 .fl small{color:#aaa;font-weight:400;text-transform:none;letter-spacing:0}
 @media (max-width: 768px) {
   .main{flex-direction:column;position:relative}
+  .painel-toggle-desktop{display:none}
 
   /* Sidebar (filtros + lista) — some por padrão; some por cima do mapa
      quando aberta pelo botão "☰ Filtros e lista" */
@@ -228,7 +241,6 @@ body{display:flex;flex-direction:column;height:100vh;color:#1a1a1a}
   #fab-camadas{right:12px;bottom:calc(14px + env(safe-area-inset-bottom))}
 }
 @media (min-width: 769px) {
-  .detail{display:flex!important}
 }
 /* Some junto com o resto da interface no modo de captura de tela do mapa */
 body.modo-captura .mobile-fab{display:none!important}
@@ -528,6 +540,9 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
   </div>
   <div class="tb-right">
     <span id="total-badge" class="tb-sub"></span>
+    <button class="btn painel-toggle-desktop" id="btn-toggle-filtros" onclick="toggleFiltrosDesktop()" title="Mostrar/ocultar a aba de filtros">🔍 Filtros</button>
+    <button class="btn painel-toggle-desktop" id="btn-toggle-legenda" onclick="toggleLegendaDesktop()" title="Mostrar/ocultar a legenda">📋 Legenda</button>
+    <button class="btn painel-toggle-desktop" id="btn-toggle-camadas" onclick="toggleLayerCtrlMobile()" title="Mostrar/ocultar as camadas">🗂 Camadas</button>
     <span id="user-chip"><span class="nome" id="user-nome"></span><button onclick="sairDaConta()">Sair</button></span>
     <button class="btn" id="btn-dashboard-prosp" onclick="abrirDashboardProspeccao()" style="position:relative">
       📊 Prospecções<span id="dash-badge-count"></span>
@@ -549,7 +564,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <button onclick="toggleSidebarMobile(false)">✕ Fechar</button>
     </div>    <!-- TAB COMPOSIÇÃO -->
     <div class="tab-content on" id="tab-quadras">
-      <div class="filters">
+      <div class="filters" id="bloco-filtros">
         <div class="fl">Área total (m²)</div>
         <div class="minmax-row">
           <input type="number" id="qf-area-min" placeholder="Mín" value="1500" inputmode="numeric" oninput="atualizarFiltroNumerico()">
@@ -682,6 +697,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
         <button id="regua-modo-area" onclick="mudarModoRegua('area')" style="flex:1;padding:4px 2px;font-size:10.5px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:#fff">▱ Área</button>
       </div>
       <div id="regua-valor" style="font-weight:700;font-size:14px;color:#e65100;text-align:center;padding:5px 2px;background:#fff8f0;border-radius:4px">Clique no mapa pra começar</div>
+      <div style="font-size:9.5px;color:#999;text-align:center;margin-top:3px">Arraste os pontos pra ajustar</div>
       <div style="display:flex;gap:4px;margin-top:6px">
         <button onclick="limparMedicao()" style="flex:1;padding:4px 2px;font-size:10.5px;border:1px solid #ccc;border-radius:4px;cursor:pointer">🗑️ Limpar</button>
         <button onclick="toggleModoRegua()" style="flex:1;padding:4px 2px;font-size:10.5px;border:1px solid #ccc;border-radius:4px;cursor:pointer">✕ Fechar</button>
@@ -2682,6 +2698,80 @@ function getEffectiveStats(q) {
 // composição "normal") quanto pros retirados de outra composição (que
 // também merecem ser tratados como composição ativa de verdade, só que
 // fisicamente separada — ver comentário mais abaixo).
+// Dois lotes marcados como "vizinhos" nos dados pré-calculados (edges)
+// podem, na prática, só se tocar num VÉRTICE (um canto encostando no
+// outro) — sem nenhuma aresta de verdade entre eles, o que não permite
+// nenhuma comunicação real entre os terrenos e não deveria contar como
+// contiguidade. Confere a geometria real (LOTES_GEOM) e exige que o
+// trecho de contato tenha comprimento de verdade (não só um ponto).
+//
+// Matemática vetorial direta (não usa turf.lineOverlap): testado e
+// confirmado que aquela função da biblioteca não detecta corretamente
+// quando uma aresta é um TRECHO PARCIAL de outra (uma aresta menor, cujos
+// pontos não coincidem exatamente com os vértices da aresta maior) — caso
+// comum quando um lote menor encosta só numa parte do lado de um lote
+// maior. Projeta os dois lotes numa aproximação local em metros (a
+// distorção de uma projeção equiretangular simples é desprezível na
+// escala de uma quadra) e mede a sobreposição real, segmento a segmento.
+//
+// Cache por par de lotes — o cálculo geométrico é feito uma vez só.
+const _cacheArestaReal = new Map();
+function _segmentosDoAnel(ring){
+  const segs = [];
+  for (let i=0;i<ring.length-1;i++) segs.push([ring[i], ring[i+1]]);
+  const primeiro = ring[0], ultimo = ring[ring.length-1];
+  if (primeiro[0]!==ultimo[0] || primeiro[1]!==ultimo[1]) segs.push([ultimo, primeiro]);
+  return segs;
+}
+// Comprimento do trecho em que dois segmentos colineares se sobrepõem (0
+// se não forem colineares, ou se não houver sobreposição de fato).
+// Coordenadas já convertidas pra metros locais.
+function _sobreposicaoColinear(a1, a2, b1, b2){
+  const dx = a2[0]-a1[0], dy = a2[1]-a1[1];
+  const comp = Math.hypot(dx, dy);
+  if (comp < 1e-9) return 0;
+  const ux = dx/comp, uy = dy/comp;
+  const TOL_PERP = 0.15; // 15cm de folga perpendicular — imprecisão normal de contorno cadastral
+  const distPerp = (p) => Math.abs((p[0]-a1[0])*uy - (p[1]-a1[1])*ux);
+  if (distPerp(b1) > TOL_PERP || distPerp(b2) > TOL_PERP) return 0;
+  const proj = (p) => (p[0]-a1[0])*ux + (p[1]-a1[1])*uy;
+  const tB1 = proj(b1), tB2 = proj(b2);
+  const bMin = Math.min(tB1,tB2), bMax = Math.max(tB1,tB2);
+  const overlapMin = Math.max(0, bMin);
+  const overlapMax = Math.min(comp, bMax);
+  return Math.max(0, overlapMax - overlapMin);
+}
+function compartilhamArestaReal(qidBase, loteA, loteB){
+  const chave = qidBase+'::'+[loteA,loteB].sort().join('::');
+  if (_cacheArestaReal.has(chave)) return _cacheArestaReal.get(chave);
+  // Por segurança: se faltar geometria de algum dos dois, assume que a
+  // aresta É real — não quebra nenhum agrupamento que já funcionava por
+  // falta de dado, só filtra quando temos como confirmar geometricamente.
+  let resultado = true;
+  try {
+    const ringA = LOTES_GEOM[`${qidBase}.${loteA}`];
+    const ringB = LOTES_GEOM[`${qidBase}.${loteB}`];
+    if (ringA && ringB && ringA.length >= 3 && ringB.length >= 3) {
+      const lat0 = ringA[0][1] * Math.PI/180;
+      const M_POR_GRAU_LAT = 111320;
+      const M_POR_GRAU_LON = 111320 * Math.cos(lat0);
+      const paraMetros = (pt) => [pt[0]*M_POR_GRAU_LON, pt[1]*M_POR_GRAU_LAT];
+      const segmentosA = _segmentosDoAnel(ringA).map(([p,q]) => [paraMetros(p), paraMetros(q)]);
+      const segmentosB = _segmentosDoAnel(ringB).map(([p,q]) => [paraMetros(p), paraMetros(q)]);
+      let comprimentoTotal = 0;
+      for (const [a1,a2] of segmentosA) {
+        for (const [b1,b2] of segmentosB) {
+          comprimentoTotal += _sobreposicaoColinear(a1,a2,b1,b2);
+        }
+      }
+      // meio metro de folga — separa aresta de verdade de ruído de
+      // precisão numérica no contorno cadastral
+      resultado = comprimentoTotal >= 0.5;
+    }
+  } catch(e) { resultado = true; }
+  _cacheArestaReal.set(chave, resultado);
+  return resultado;
+}
 function _agruparPorAdjacenciaEZona(lotesAlvo, edges, qidBase, q){
   const alvoSet = new Set(lotesAlvo);
   const zonaPorLote = {};
@@ -2691,6 +2781,7 @@ function _agruparPorAdjacenciaEZona(lotesAlvo, edges, qidBase, q){
   edges.forEach(([a,b]) => {
     if (!alvoSet.has(a) || !alvoSet.has(b)) return;
     if (zonaPorLote[a] !== zonaPorLote[b]) return;
+    if (!compartilhamArestaReal(qidBase, a, b)) return;
     adj[a].add(b); adj[b].add(a);
   });
   const visitado = new Set();
@@ -5289,12 +5380,71 @@ function sqlComDigito(sql) {
   const digito = DIGITO_SQL[sql];
   return digito ? `${sql}-${digito}` : sql;
 }
+// Transações de ITBI mais próximas de um ponto (usado no popup do lote,
+// pra dar uma referência de mercado sem precisar abrir a ficha inteira).
+// Raio bem mais restrito que o da "avaliação preliminar" (que busca
+// numa região) — aqui o interesse é "o que vendeu perto desse lote
+// específico", não uma amostra estatística da região.
+function transacoesItbiProximasDoLote(lat, lon, maxResultados){
+  const raioKm = 0.15;
+  const cosLat = Math.cos(lat * Math.PI/180);
+  const dLat = raioKm / 111.32;
+  const dLon = raioKm / (111.32 * (cosLat || 1e-6));
+  const proximas = [];
+  for (const c of ITBI_COMPARAVEIS) {
+    if (Math.abs(c.lat - lat) > dLat || Math.abs(c.lon - lon) > dLon) continue;
+    const dist = distanciaKm(lat, lon, c.lat, c.lon);
+    if (dist <= raioKm) proximas.push({...c, dist});
+  }
+  proximas.sort((a,b) => new Date(b.d) - new Date(a.d));
+  return proximas.slice(0, maxResultados || 3);
+}
 function lotePopupHTML(sql, groupId) {
   const stL = STATUS_LOTE_CACHE[sql] || {};
   const safeId = sql.replace(/\./g,'-');
   const corTexto = (st) => stL.status===st ? '#fff' : '#555';
-  return `<div style="min-width:200px">
+
+  // ── Bloco de dados do lote: proprietário, áreas e transações ITBI
+  // próximas — pedido do Matheus, pra não precisar abrir a ficha inteira
+  // só pra ver isso ao clicar num lote específico.
+  const nomeProp = nomeProprietario(sql);
+  const areaTerreno = LOTES_AREA[sql];
+  const iptu = dadosIptu(sql);
+  let transacoesHtml = '';
+  const ringLote = LOTES_GEOM[sql];
+  if (ringLote && ringLote.length >= 3) {
+    try {
+      const anelFechado = ringLote.slice();
+      const primeiroPt = anelFechado[0], ultimoPt = anelFechado[anelFechado.length-1];
+      if (primeiroPt[0]!==ultimoPt[0] || primeiroPt[1]!==ultimoPt[1]) anelFechado.push(primeiroPt);
+      const centro = turf.centroid(turf.polygon([anelFechado])).geometry.coordinates; // [lon, lat]
+      const transacoes = transacoesItbiProximasDoLote(centro[1], centro[0], 3);
+      if (transacoes.length) {
+        transacoesHtml = transacoes.map(t => {
+          const d = new Date(t.d);
+          const dataFmt = `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+          return `${dataFmt} — R$ ${Math.round(t.vt).toLocaleString('pt-BR')}`;
+        }).join('<br>');
+      }
+    } catch(e) { /* geometria com problema — só não mostra as transações */ }
+  }
+  const dadosLoteHtml = `
+    <div style="background:#f7f7f7;border-radius:5px;padding:6px 8px;margin-bottom:6px;font-size:11px;line-height:1.5">
+      <div>👤 ${nomeProp
+        ? `<strong>${escapeHtmlHistorico(nomeProp)}</strong>`
+        : `<span style="color:#90a4ae">não consultado</span> <button class="prop-btn" style="font-size:9.5px;padding:1px 6px" onclick="consultarProprietario('${sql}')">🔍 Consultar</button>`
+      }</div>
+      ${!nomeProp ? `<div class="prop-form" id="prop-form-${safeId}" style="display:none;margin:4px 0">
+        <input id="prop-input-${safeId}" placeholder="Cole o nome que apareceu no formulário">
+        <button onclick="salvarProprietario('${sql}')">Salvar</button>
+      </div>` : ''}
+      <div>📐 Terreno: ${areaTerreno!=null ? Math.round(areaTerreno).toLocaleString('pt-BR')+' m²' : '—'}${iptu ? ` · 🏢 Construído: ${Math.round(iptu.areaConstruida).toLocaleString('pt-BR')} m²` : ''}</div>
+      ${transacoesHtml ? `<div style="margin-top:4px;padding-top:4px;border-top:1px solid #e5e5e5"><strong>Transações ITBI próximas:</strong><br>${transacoesHtml}</div>` : ''}
+    </div>`;
+
+  return `<div style="min-width:220px">
     <div style="font-family:monospace;font-size:12px;color:#333;margin-bottom:6px;font-weight:600">${sqlComDigito(sql)}</div>
+    ${dadosLoteHtml}
     <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px">
       <button style="flex:1;min-width:56px;font-size:10.5px;padding:4px 4px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:${stL.status==='obras'?'#8a8a8a':'#fff'};color:${corTexto('obras')}"
         onclick="toggleLoteStatus('${sql}','obras','${groupId}')">🏗 Obras</button>
@@ -6496,9 +6646,25 @@ function _atualizarBotoesModoRegua(){
 function _cliqueMedicao(e){
   if (!_medicao) return;
   _medicao.pontos.push(e.latlng);
-  const marcador = L.circleMarker(e.latlng, {radius:4, color:'#fff', weight:2, fillColor:'#e65100', fillOpacity:1, interactive:false}).addTo(map);
+  const marcador = _criarMarcadorMedicao(e.latlng);
   _medicao.marcadores.push(marcador);
   _redesenharMedicao();
+}
+// Marcador arrastável — permite ajustar um ponto já colocado sem precisar
+// apagar tudo e desenhar de novo. L.marker (não L.circleMarker) porque só
+// L.marker suporta draggable:true nativamente no Leaflet.
+function _criarMarcadorMedicao(latlng){
+  const marcador = L.marker(latlng, {
+    draggable: true,
+    icon: L.divIcon({className: 'regua-ponto', iconSize: [14,14], iconAnchor: [7,7]}),
+  }).addTo(map);
+  marcador.on('drag', () => {
+    const i = _medicao.marcadores.indexOf(marcador);
+    if (i === -1) return;
+    _medicao.pontos[i] = marcador.getLatLng();
+    _redesenharMedicao();
+  });
+  return marcador;
 }
 function _redesenharMedicao(){
   if (!_medicao) return;
@@ -7377,6 +7543,19 @@ function toggleLayerCtrlMobile(forcar){
   const abrir = forcar !== undefined ? forcar : !el.classList.contains('mobile-open');
   el.classList.toggle('mobile-open', abrir);
   if (abrir) toggleSidebarMobile(false); // evita duas folhas abertas ao mesmo tempo
+}
+// Filtros e legenda — mesmo princípio de "oculto até clicar" pedido pelo
+// Matheus, só que pro desktop (a lista de resultados continua visível
+// mesmo com os filtros ocultos — só o bloco de campos de filtro some).
+function toggleFiltrosDesktop(forcar){
+  const el = document.getElementById('bloco-filtros');
+  const abrir = forcar !== undefined ? forcar : el.classList.contains('oculto');
+  el.classList.toggle('oculto', !abrir);
+}
+function toggleLegendaDesktop(forcar){
+  const el = document.querySelector('.map-legend');
+  const abrir = forcar !== undefined ? forcar : !el.classList.contains('open');
+  el.classList.toggle('open', abrir);
 }
 
 
