@@ -5382,22 +5382,14 @@ function sqlComDigito(sql) {
 }
 // Transações de ITBI mais próximas de um ponto (usado no popup do lote,
 // pra dar uma referência de mercado sem precisar abrir a ficha inteira).
-// Raio bem mais restrito que o da "avaliação preliminar" (que busca
-// numa região) — aqui o interesse é "o que vendeu perto desse lote
-// específico", não uma amostra estatística da região.
-function transacoesItbiProximasDoLote(lat, lon, maxResultados){
-  const raioKm = 0.15;
-  const cosLat = Math.cos(lat * Math.PI/180);
-  const dLat = raioKm / 111.32;
-  const dLon = raioKm / (111.32 * (cosLat || 1e-6));
-  const proximas = [];
-  for (const c of ITBI_COMPARAVEIS) {
-    if (Math.abs(c.lat - lat) > dLat || Math.abs(c.lon - lon) > dLon) continue;
-    const dist = distanciaKm(lat, lon, c.lat, c.lon);
-    if (dist <= raioKm) proximas.push({...c, dist});
-  }
-  proximas.sort((a,b) => new Date(b.d) - new Date(a.d));
-  return proximas.slice(0, maxResultados || 3);
+// Transações de ITBI do LOTE EXATO (não por proximidade) — usa a função
+// já existente transacoesItbi(sql), que casa pelo SQL de verdade via
+// ITBI_RAW (índice direto, sem precisar buscar por proximidade
+// geográfica). Ordena da mais recente pra mais antiga.
+function transacoesItbiDoLote(sql, maxResultados){
+  const todas = transacoesItbi(sql);
+  const ordenadas = [...todas].sort((a,b) => new Date(b.d) - new Date(a.d));
+  return ordenadas.slice(0, maxResultados || 5);
 }
 function lotePopupHTML(sql, groupId) {
   const stL = STATUS_LOTE_CACHE[sql] || {};
@@ -5411,22 +5403,13 @@ function lotePopupHTML(sql, groupId) {
   const areaTerreno = LOTES_AREA[sql];
   const iptu = dadosIptu(sql);
   let transacoesHtml = '';
-  const ringLote = LOTES_GEOM[sql];
-  if (ringLote && ringLote.length >= 3) {
-    try {
-      const anelFechado = ringLote.slice();
-      const primeiroPt = anelFechado[0], ultimoPt = anelFechado[anelFechado.length-1];
-      if (primeiroPt[0]!==ultimoPt[0] || primeiroPt[1]!==ultimoPt[1]) anelFechado.push(primeiroPt);
-      const centro = turf.centroid(turf.polygon([anelFechado])).geometry.coordinates; // [lon, lat]
-      const transacoes = transacoesItbiProximasDoLote(centro[1], centro[0], 3);
-      if (transacoes.length) {
-        transacoesHtml = transacoes.map(t => {
-          const d = new Date(t.d);
-          const dataFmt = `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
-          return `${dataFmt} — R$ ${Math.round(t.vt).toLocaleString('pt-BR')}`;
-        }).join('<br>');
-      }
-    } catch(e) { /* geometria com problema — só não mostra as transações */ }
+  const transacoes = transacoesItbiDoLote(sql, 3);
+  if (transacoes.length) {
+    transacoesHtml = transacoes.map(t => {
+      const d = new Date(t.d);
+      const dataFmt = `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+      return `${dataFmt} — R$ ${Math.round(t.v).toLocaleString('pt-BR')}`;
+    }).join('<br>');
   }
   const dadosLoteHtml = `
     <div style="background:#f7f7f7;border-radius:5px;padding:6px 8px;margin-bottom:6px;font-size:11px;line-height:1.5">
@@ -5439,7 +5422,7 @@ function lotePopupHTML(sql, groupId) {
         <button onclick="salvarProprietario('${sql}')">Salvar</button>
       </div>` : ''}
       <div>📐 Terreno: ${areaTerreno!=null ? Math.round(areaTerreno).toLocaleString('pt-BR')+' m²' : '—'}${iptu ? ` · 🏢 Construído: ${Math.round(iptu.areaConstruida).toLocaleString('pt-BR')} m²` : ''}</div>
-      ${transacoesHtml ? `<div style="margin-top:4px;padding-top:4px;border-top:1px solid #e5e5e5"><strong>Transações ITBI próximas:</strong><br>${transacoesHtml}</div>` : ''}
+      ${transacoesHtml ? `<div style="margin-top:4px;padding-top:4px;border-top:1px solid #e5e5e5"><strong>Transações ITBI do lote:</strong><br>${transacoesHtml}</div>` : ''}
     </div>`;
 
   return `<div style="min-width:220px">
