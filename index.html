@@ -2377,6 +2377,12 @@ async function carregarDistrito(nomeDistrito){
     // divisa que já estava carregada — reunir na hora evita que ela apareça
     // duas vezes no mapa.
     unificarQuadrasDuplicadas();
+    // Mesmo motivo do reparo que roda uma vez no boot (ver
+    // repararProspeccoesAposUnificacao): se este distrito não estava entre
+    // os pré-carregados, qualquer prospecção gravada sob um subId que
+    // mudou de nome (reagrupamento dinâmico) só pode ser corrigida agora,
+    // que os dados dele finalmente existem em QUADRAS/getSubGroups.
+    await repararProspeccoesAposUnificacao();
 
     // invalida caches que dependiam do conjunto de dados anterior
     _avalScoreCache.clear();
@@ -3275,20 +3281,44 @@ const DIAS_ALERTA_PROSPECCAO = 15;
 let PROSPECCAO_STATUS_CACHE = {};    // subId -> {subId,qid,bairro,lotes,area,corretor,email,dataEnvio}
 let PROSPECCAO_HISTORICO_CACHE = {}; // subId -> [{key,data,texto,lote}, ...] (mais recente primeiro)
 
+// Extrai a "quadra fiscal base" de um subId, removendo tanto o sufixo de
+// grupo pré-computado ("-b", "-c"...) quanto o de subdivisão dinâmica
+// ("~N"). Ex: "016.074-c~3" -> "016.074"; "016.074~2" -> "016.074".
+function _qidBaseDeSubId(subId){
+  return subId.split('-')[0].split('~')[0];
+}
+// Fallback pra quando o subId exato não bate mais com nenhuma chave do
+// cache — acontece quando o agrupamento dinâmico de uma quadra muda de
+// "~N" depois que o status já tinha sido salvo sob o nome antigo (ex:
+// um ajuste no critério de contiguidade, uma restrição nova mudando a
+// divisão em sub-grupos). Sem isso, a cor "volta" pra disponível mesmo
+// a composição continuando de fato em prospecção/validação/baixa
+// prioridade — só que sob outro nome de sub-grupo. Casa por SOBREPOSIÇÃO
+// REAL de lotes dentro da mesma quadra fiscal, não só pelo nome.
+function _statusPorSobreposicaoDeLotes(cache, qidBase, lotesAtuais){
+  if (!lotesAtuais || !lotesAtuais.length) return null;
+  for (const k in cache) {
+    if (_qidBaseDeSubId(k) !== qidBase) continue;
+    const entry = cache[k];
+    if (entry && entry.lotes && lotesAtuais.every(l => entry.lotes.includes(l))) return entry;
+  }
+  return null;
+}
 function corComposicao(key, corBase, lotesAtuais){
-  const status = PROSPECCAO_STATUS_CACHE[key];
+  const qidBase = _qidBaseDeSubId(key);
+  const status = PROSPECCAO_STATUS_CACHE[key] || _statusPorSobreposicaoDeLotes(PROSPECCAO_STATUS_CACHE, qidBase, lotesAtuais);
   if (status && (!lotesAtuais || lotesAtuais.every(l => status.lotes.includes(l)))) {
     return COR_PROSPECCAO;
   }
   // "Validar com o Ale" só aparece se a composição NÃO estiver em
   // prospecção — prospecção é um estado mais avançado, tem prioridade.
-  const validacao = VALIDACAO_ALE_CACHE[key];
+  const validacao = VALIDACAO_ALE_CACHE[key] || _statusPorSobreposicaoDeLotes(VALIDACAO_ALE_CACHE, qidBase, lotesAtuais);
   if (validacao && (!lotesAtuais || lotesAtuais.every(l => validacao.lotes.includes(l)))) {
     return COR_VALIDACAO_ALE;
   }
   // "Baixa prioridade" vem depois — some se a composição já estiver em
   // prospecção ou aguardando validação, que são estados mais urgentes.
-  const baixaPrioridade = BAIXA_PRIORIDADE_CACHE[key];
+  const baixaPrioridade = BAIXA_PRIORIDADE_CACHE[key] || _statusPorSobreposicaoDeLotes(BAIXA_PRIORIDADE_CACHE, qidBase, lotesAtuais);
   if (baixaPrioridade && (!lotesAtuais || lotesAtuais.every(l => baixaPrioridade.lotes.includes(l)))) {
     return COR_BAIXA_PRIORIDADE;
   }
@@ -5407,22 +5437,12 @@ function transacoesItbiDoLote(sql, maxResultados){
   const ordenados = [...todas].sort((a,b) => (parseDataBR(b.d)||0) - (parseDataBR(a.d)||0));
   return ordenados.slice(0, maxResultados || 5);
 }
-// Data da transação mais recente em todo o dataset de ITBI — usada como
-// "atualizado até" quando um lote específico não tem nenhuma transação,
-// pra deixar claro que a ausência é sobre aquele imóvel, não sobre o
-// dataset estar desatualizado. Calculada uma vez só e cacheada.
-let _itbiDataMaisRecenteCache = null;
-function dataMaisRecenteItbiPontos(){
-  if (_itbiDataMaisRecenteCache) return _itbiDataMaisRecenteCache;
-  if (!itbiPontosLoaded) return null;
-  let maisRecente = null;
-  for (const pt of ITBI_PONTOS_MAPA) {
-    const d = parseDataBR(pt.d);
-    if (d && (!maisRecente || d > maisRecente)) maisRecente = d;
-  }
-  _itbiDataMaisRecenteCache = maisRecente;
-  return maisRecente;
-}
+// Data fixa usada quando um lote específico não tem nenhuma transação —
+// a pedido do Matheus: a base de ITBI anexada vai só até 2022, então a
+// data de corte é sempre 01/01/2022, não a transação mais recente que
+// aparecer no dataset (que pode ser bem anterior a isso pra lotes sem
+// nenhum registro perto do fim do período coberto).
+const ITBI_DATA_CORTE_FIXA = '01/01/2022';
 function lotePopupHTML(sql, groupId) {
   const stL = STATUS_LOTE_CACHE[sql] || {};
   const safeId = sql.replace(/\./g,'-');
@@ -5444,11 +5464,7 @@ function lotePopupHTML(sql, groupId) {
     if (transacoes.length) {
       transacoesHtml = transacoes.map(t => `${t.d} — R$ ${Math.round(t.v).toLocaleString('pt-BR')}`).join('<br>');
     } else {
-      const dataCorte = dataMaisRecenteItbiPontos();
-      const dataCorteFmt = dataCorte
-        ? `${String(dataCorte.getDate()).padStart(2,'0')}/${String(dataCorte.getMonth()+1).padStart(2,'0')}/${dataCorte.getFullYear()}`
-        : '—';
-      transacoesHtml = `<span style="color:#90a4ae">Não houve transações para este imóvel desde ${dataCorteFmt}</span>`;
+      transacoesHtml = `<span style="color:#90a4ae">Não houve transações para este imóvel desde ${ITBI_DATA_CORTE_FIXA}</span>`;
     }
   }
   const dadosLoteHtml = `
