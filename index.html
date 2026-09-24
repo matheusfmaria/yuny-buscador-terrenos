@@ -110,7 +110,7 @@ body{display:flex;flex-direction:column;height:100vh;color:#1a1a1a}
 .layer-row label{color:#444;cursor:pointer;user-select:none}
 .loading-badge{font-size:10px;color:#f9a825;margin-left:4px}
 
-.map-legend{position:absolute;bottom:28px;left:10px;z-index:999;background:#fff;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:11px;display:none}
+.map-legend{position:absolute;bottom:74px;left:10px;z-index:999;background:#fff;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:11px;display:none}
 .map-legend.open{display:block}
 .lg-title{font-weight:600;color:#555;margin-bottom:5px;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
 .lg-row{display:flex;align-items:center;gap:6px;color:#666;margin-bottom:3px}
@@ -241,7 +241,21 @@ body{display:flex;flex-direction:column;height:100vh;color:#1a1a1a}
   #fab-camadas{right:12px;bottom:calc(14px + env(safe-area-inset-bottom))}
 }
 @media (min-width: 769px) {
+  .sidebar.fechado-desktop{display:none}
+  #btn-reabrir-sidebar.mostrar{
+    display:flex;position:absolute;z-index:900;align-items:center;gap:6px;
+    top:12px;left:12px;
+    background:#fff;border:1px solid #ddd;border-radius:99px;
+    padding:8px 14px;font-size:12px;font-weight:600;color:#1a2e1a;
+    box-shadow:0 2px 10px rgba(0,0,0,.18);cursor:pointer;
+  }
 }
+/* O botão de fechar dentro da sidebar (estilo .detail-close) só faz
+   sentido no desktop — no mobile já existe o .sidebar-mobile-hd próprio */
+@media (max-width: 768px) {
+  .sidebar-desktop-close{display:none}
+}
+#btn-reabrir-sidebar{display:none}
 /* Some junto com o resto da interface no modo de captura de tela do mapa */
 body.modo-captura .mobile-fab{display:none!important}
 
@@ -540,9 +554,6 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
   </div>
   <div class="tb-right">
     <span id="total-badge" class="tb-sub"></span>
-    <button class="btn painel-toggle-desktop" id="btn-toggle-filtros" onclick="toggleFiltrosDesktop()" title="Mostrar/ocultar a aba de filtros">🔍 Filtros</button>
-    <button class="btn painel-toggle-desktop" id="btn-toggle-legenda" onclick="toggleLegendaDesktop()" title="Mostrar/ocultar a legenda">📋 Legenda</button>
-    <button class="btn painel-toggle-desktop" id="btn-toggle-camadas" onclick="toggleLayerCtrlMobile()" title="Mostrar/ocultar as camadas">🗂 Camadas</button>
     <span id="user-chip"><span class="nome" id="user-nome"></span><button onclick="sairDaConta()">Sair</button></span>
     <button class="btn" id="btn-dashboard-prosp" onclick="abrirDashboardProspeccao()" style="position:relative">
       📊 Prospecções<span id="dash-badge-count"></span>
@@ -562,7 +573,12 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     <div class="sidebar-mobile-hd">
       <span>Filtros e composições</span>
       <button onclick="toggleSidebarMobile(false)">✕ Fechar</button>
-    </div>    <!-- TAB COMPOSIÇÃO -->
+    </div>
+    <!-- Fechar a aba inteira (filtros + lista) no desktop — mesmo estilo
+         do botão de fechar da ficha da composição (.detail-close). Pedido
+         do Matheus no lugar do botão "Filtros" que existia no topbar. -->
+    <div class="detail-close sidebar-desktop-close" onclick="toggleSidebarDesktop(false)">✕ Fechar</div>
+    <!-- TAB COMPOSIÇÃO -->
     <div class="tab-content on" id="tab-quadras">
       <div class="filters" id="bloco-filtros">
         <div class="fl">Área total (m²)</div>
@@ -679,11 +695,21 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
   <div class="map-wrap">
     <div id="map"></div>
 
+    <!-- Reabre a aba de filtros/composições depois de fechada pelo botão
+         "✕ Fechar" de dentro dela — só aparece (classe .mostrar) quando
+         a sidebar está fechada no desktop. -->
+    <button id="btn-reabrir-sidebar" onclick="toggleSidebarDesktop(true)" title="Mostrar filtros e composições">☰ Filtros e composições</button>
+
     <!-- ALTERNAR MAPA / SATÉLITE -->
     <div class="basemap-ctrl" style="position:absolute;top:10px;right:10px;z-index:1000;background:#fff;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.3);overflow:hidden;display:flex;font-size:12px">
       <button id="bm-mapa" onclick="setBasemap('mapa')" style="border:none;padding:6px 12px;cursor:pointer;background:#2e7d32;color:#fff;font-weight:600">🗺 Mapa</button>
       <button id="bm-satelite" onclick="setBasemap('satelite')" style="border:none;padding:6px 12px;cursor:pointer;background:#fff;color:#333">🛰 Satélite</button>
     </div>
+
+    <!-- Botão de camadas (era no topbar) — logo abaixo do toggle Mapa/Satélite,
+         pra ficar perto do que ele controla. Só desktop (mobile usa o fab próprio). -->
+    <button class="btn painel-toggle-desktop" id="btn-toggle-camadas" onclick="toggleLayerCtrlMobile()" title="Mostrar/ocultar as camadas"
+      style="position:absolute;top:48px;right:10px;z-index:1000;box-shadow:0 1px 4px rgba(0,0,0,.3)">🗂 Camadas</button>
 
     <!-- RÉGUA DE MEDIÇÃO (distância/área) — igual ao Google Earth. Fica no
          canto esquerdo, abaixo do zoom padrão do Leaflet, pra não disputar
@@ -754,6 +780,11 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <div class="lg-row"><div class="lg-dot" style="background:#9e9e9e"></div> Em obras ou não edificável</div>
     </div>
     <div class="map-info" id="map-info">🗺 Carregando...</div>
+    <!-- Botão de legenda (era no topbar) — logo acima do indicador de
+         sincronização, só desktop. O painel (.map-legend) abre por cima
+         dele (bottom:74px), pra não sobrepor o botão. -->
+    <button class="btn painel-toggle-desktop" id="btn-toggle-legenda" onclick="toggleLegendaDesktop()" title="Mostrar/ocultar a legenda"
+      style="position:absolute;bottom:40px;left:10px;z-index:1000;box-shadow:0 1px 4px rgba(0,0,0,.2)">📋 Legenda</button>
     <div id="sync-indicator" style="display:none;position:absolute;bottom:10px;left:10px;background:#fff;padding:5px 10px;border-radius:6px;font-size:11px;box-shadow:0 1px 4px rgba(0,0,0,.2);z-index:1000"></div>
 
     <!-- BOTÕES FLUTUANTES (só no celular): mapa fica em tela cheia por padrão,
@@ -2741,36 +2772,20 @@ function _sobreposicaoColinear(a1, a2, b1, b2){
   const overlapMax = Math.min(comp, bMax);
   return Math.max(0, overlapMax - overlapMin);
 }
+// DESATIVADA (v194) — regressão confirmada com dados reais do distrito
+// Itaim Bibi: mesmo com tolerância bem generosa (3-5m), 10-15% das
+// arestas pré-computadas em 'edges' eram rejeitadas por ruído de
+// digitalização do contorno cadastral, sem separação confiável entre
+// "aresta real com imprecisão" e "toque só por vértice" (a distribuição
+// de sobreposição fica com muitos casos bem na borda de qualquer limiar
+// testado). Isso quebrou composições vinculadas reais, já em
+// prospecção (ex: quadra 016.074, relatado pelo Matheus). O 'edges'
+// pré-computado (gerado por script Python, fora do navegador) volta a
+// ser a única fonte de verdade pra contiguidade — se o bug original de
+// toque-por-vértice reaparecer, precisa de uma correção validada contra
+// os dados reais antes de entrar em produção, não só testada em teoria.
 function compartilhamArestaReal(qidBase, loteA, loteB){
-  const chave = qidBase+'::'+[loteA,loteB].sort().join('::');
-  if (_cacheArestaReal.has(chave)) return _cacheArestaReal.get(chave);
-  // Por segurança: se faltar geometria de algum dos dois, assume que a
-  // aresta É real — não quebra nenhum agrupamento que já funcionava por
-  // falta de dado, só filtra quando temos como confirmar geometricamente.
-  let resultado = true;
-  try {
-    const ringA = LOTES_GEOM[`${qidBase}.${loteA}`];
-    const ringB = LOTES_GEOM[`${qidBase}.${loteB}`];
-    if (ringA && ringB && ringA.length >= 3 && ringB.length >= 3) {
-      const lat0 = ringA[0][1] * Math.PI/180;
-      const M_POR_GRAU_LAT = 111320;
-      const M_POR_GRAU_LON = 111320 * Math.cos(lat0);
-      const paraMetros = (pt) => [pt[0]*M_POR_GRAU_LON, pt[1]*M_POR_GRAU_LAT];
-      const segmentosA = _segmentosDoAnel(ringA).map(([p,q]) => [paraMetros(p), paraMetros(q)]);
-      const segmentosB = _segmentosDoAnel(ringB).map(([p,q]) => [paraMetros(p), paraMetros(q)]);
-      let comprimentoTotal = 0;
-      for (const [a1,a2] of segmentosA) {
-        for (const [b1,b2] of segmentosB) {
-          comprimentoTotal += _sobreposicaoColinear(a1,a2,b1,b2);
-        }
-      }
-      // meio metro de folga — separa aresta de verdade de ruído de
-      // precisão numérica no contorno cadastral
-      resultado = comprimentoTotal >= 0.5;
-    }
-  } catch(e) { resultado = true; }
-  _cacheArestaReal.set(chave, resultado);
-  return resultado;
+  return true;
 }
 function _agruparPorAdjacenciaEZona(lotesAlvo, edges, qidBase, q){
   const alvoSet = new Set(lotesAlvo);
@@ -5382,14 +5397,31 @@ function sqlComDigito(sql) {
 }
 // Transações de ITBI mais próximas de um ponto (usado no popup do lote,
 // pra dar uma referência de mercado sem precisar abrir a ficha inteira).
-// Transações de ITBI do LOTE EXATO (não por proximidade) — usa a função
-// já existente transacoesItbi(sql), que casa pelo SQL de verdade via
-// ITBI_RAW (índice direto, sem precisar buscar por proximidade
-// geográfica). Ordena da mais recente pra mais antiga.
+// Transações de ITBI do LOTE EXATO — usa ITBI_PONTOS_MAPA (o mesmo
+// dataset que gera os pontos laranjas no mapa, carregado sob demanda de
+// pacotes_extra/itbi_pontos_mapa.json). NÃO usar ITBI_RAW aqui: é um
+// dataset embutido bem menor/desatualizado, sobrado de uma versão
+// anterior, e não bate com o que aparece visualmente no mapa.
 function transacoesItbiDoLote(sql, maxResultados){
-  const todas = transacoesItbi(sql);
-  const ordenadas = [...todas].sort((a,b) => new Date(b.d) - new Date(a.d));
-  return ordenadas.slice(0, maxResultados || 5);
+  const todas = ITBI_PONTOS_MAPA.filter(pt => pt.sql === sql);
+  const ordenados = [...todas].sort((a,b) => (parseDataBR(b.d)||0) - (parseDataBR(a.d)||0));
+  return ordenados.slice(0, maxResultados || 5);
+}
+// Data da transação mais recente em todo o dataset de ITBI — usada como
+// "atualizado até" quando um lote específico não tem nenhuma transação,
+// pra deixar claro que a ausência é sobre aquele imóvel, não sobre o
+// dataset estar desatualizado. Calculada uma vez só e cacheada.
+let _itbiDataMaisRecenteCache = null;
+function dataMaisRecenteItbiPontos(){
+  if (_itbiDataMaisRecenteCache) return _itbiDataMaisRecenteCache;
+  if (!itbiPontosLoaded) return null;
+  let maisRecente = null;
+  for (const pt of ITBI_PONTOS_MAPA) {
+    const d = parseDataBR(pt.d);
+    if (d && (!maisRecente || d > maisRecente)) maisRecente = d;
+  }
+  _itbiDataMaisRecenteCache = maisRecente;
+  return maisRecente;
 }
 function lotePopupHTML(sql, groupId) {
   const stL = STATUS_LOTE_CACHE[sql] || {};
@@ -5402,14 +5434,22 @@ function lotePopupHTML(sql, groupId) {
   const nomeProp = nomeProprietario(sql);
   const areaTerreno = LOTES_AREA[sql];
   const iptu = dadosIptu(sql);
-  let transacoesHtml = '';
-  const transacoes = transacoesItbiDoLote(sql, 3);
-  if (transacoes.length) {
-    transacoesHtml = transacoes.map(t => {
-      const d = new Date(t.d);
-      const dataFmt = `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
-      return `${dataFmt} — R$ ${Math.round(t.v).toLocaleString('pt-BR')}`;
-    }).join('<br>');
+  let transacoesHtml;
+  if (itbiPontosFalhou) {
+    transacoesHtml = `<span style="color:#90a4ae">Não foi possível carregar as transações de ITBI</span>`;
+  } else if (!itbiPontosLoaded) {
+    transacoesHtml = `<span style="color:#90a4ae">Carregando transações de ITBI…</span>`;
+  } else {
+    const transacoes = transacoesItbiDoLote(sql, 3);
+    if (transacoes.length) {
+      transacoesHtml = transacoes.map(t => `${t.d} — R$ ${Math.round(t.v).toLocaleString('pt-BR')}`).join('<br>');
+    } else {
+      const dataCorte = dataMaisRecenteItbiPontos();
+      const dataCorteFmt = dataCorte
+        ? `${String(dataCorte.getDate()).padStart(2,'0')}/${String(dataCorte.getMonth()+1).padStart(2,'0')}/${dataCorte.getFullYear()}`
+        : '—';
+      transacoesHtml = `<span style="color:#90a4ae">Não houve transações para este imóvel desde ${dataCorteFmt}</span>`;
+    }
   }
   const dadosLoteHtml = `
     <div style="background:#f7f7f7;border-radius:5px;padding:6px 8px;margin-bottom:6px;font-size:11px;line-height:1.5">
@@ -5422,7 +5462,7 @@ function lotePopupHTML(sql, groupId) {
         <button onclick="salvarProprietario('${sql}')">Salvar</button>
       </div>` : ''}
       <div>📐 Terreno: ${areaTerreno!=null ? Math.round(areaTerreno).toLocaleString('pt-BR')+' m²' : '—'}${iptu ? ` · 🏢 Construído: ${Math.round(iptu.areaConstruida).toLocaleString('pt-BR')} m²` : ''}</div>
-      ${transacoesHtml ? `<div style="margin-top:4px;padding-top:4px;border-top:1px solid #e5e5e5"><strong>Transações ITBI do lote:</strong><br>${transacoesHtml}</div>` : ''}
+      <div style="margin-top:4px;padding-top:4px;border-top:1px solid #e5e5e5"><strong>Transações ITBI:</strong><br>${transacoesHtml}</div>
     </div>`;
 
   return `<div style="min-width:220px">
@@ -6494,7 +6534,37 @@ function abrirPopupEmpreendimento(idx, latlng){
 // por local, guardando todas as transações daquele local; clique abre uma
 // tabela com todas elas, ordenada da mais recente pra mais antiga (pedido
 // do Matheus). O spiderfy fica desligado (spiderfyOnMaxZoom:false acima).
-let itbiPontosLoaded=false, itbiPontosCarregando=false;
+let itbiPontosLoaded=false, itbiPontosCarregando=false, itbiPontosFalhou=false, itbiMarcadoresDesenhados=false;
+// Garante que os DADOS de ITBI estejam carregados, sem desenhar a camada
+// de marcadores no mapa — usado pela ficha do lote pra mostrar as
+// transações mesmo que o usuário nunca tenha ligado a camada visual.
+// Seguro pra chamar várias vezes: se já carregou, resolve na hora; se já
+// tem uma carga em andamento (por outra ficha ou pela camada visual),
+// espera ela terminar em vez de disparar outro fetch.
+async function garantirItbiPontosCarregados(){
+  if (itbiPontosLoaded) return true;
+  if (itbiPontosCarregando) {
+    return new Promise(resolve => {
+      const espera = setInterval(() => {
+        if (!itbiPontosCarregando) { clearInterval(espera); resolve(itbiPontosLoaded); }
+      }, 200);
+    });
+  }
+  itbiPontosCarregando = true;
+  itbiPontosFalhou = false;
+  try {
+    const dados = await fetchComCache('pacotes_extra/itbi_pontos_mapa.json');
+    pushSeguro(ITBI_PONTOS_MAPA, dados);
+  } catch(e) {
+    itbiPontosCarregando = false;
+    itbiPontosFalhou = true;
+    console.warn('Falha ao carregar pontos de ITBI:', e);
+    return false;
+  }
+  itbiPontosLoaded = true;
+  itbiPontosCarregando = false;
+  return true;
+}
 function parseDataBR(d){
   if (!d) return null;
   const [dd,mm,yyyy] = d.split('/').map(Number);
@@ -6530,19 +6600,14 @@ function abrirTabelaPontosItbi(pontos){
   document.getElementById('itbi-ponto-overlay').classList.add('on');
 }
 async function loadItbiPontosLayer(){
-  if(itbiPontosLoaded || itbiPontosCarregando) return;
-  itbiPontosCarregando = true;
+  if(itbiMarcadoresDesenhados) return;
   mostrarToast('Carregando transações de ITBI…');
-  try {
-    const dados = await fetchComCache('pacotes_extra/itbi_pontos_mapa.json');
-    pushSeguro(ITBI_PONTOS_MAPA, dados);
-  } catch(e) {
-    itbiPontosCarregando = false;
+  const ok = await garantirItbiPontosCarregados();
+  if (!ok) {
     mostrarToast('Não consegui carregar as transações de ITBI. Tente de novo.');
-    console.warn('Falha ao carregar pontos de ITBI:', e);
     return;
   }
-  itbiPontosLoaded=true; itbiPontosCarregando=false;
+  itbiMarcadoresDesenhados = true;
 
   // Agrupa por local (lat,lon) — várias transações do mesmo lote caem no
   // mesmo ponto e viram um único marcador
@@ -7530,10 +7595,17 @@ function toggleLayerCtrlMobile(forcar){
 // Filtros e legenda — mesmo princípio de "oculto até clicar" pedido pelo
 // Matheus, só que pro desktop (a lista de resultados continua visível
 // mesmo com os filtros ocultos — só o bloco de campos de filtro some).
-function toggleFiltrosDesktop(forcar){
-  const el = document.getElementById('bloco-filtros');
-  const abrir = forcar !== undefined ? forcar : el.classList.contains('oculto');
-  el.classList.toggle('oculto', !abrir);
+// Fecha/abre a aba inteira de filtros+composições no desktop (era só o
+// bloco de campos de filtro antes; agora, a pedido do Matheus, fecha a
+// aba toda, igual ao comportamento no mobile — só que aqui some por
+// cima do botão "✕ Fechar" de dentro dela, e não por um botão do topbar).
+function toggleSidebarDesktop(forcar){
+  const el = document.getElementById('sidebar');
+  const abrir = forcar !== undefined ? forcar : el.classList.contains('fechado-desktop');
+  el.classList.toggle('fechado-desktop', !abrir);
+  const btnReabrir = document.getElementById('btn-reabrir-sidebar');
+  if (btnReabrir) btnReabrir.classList.toggle('mostrar', !abrir);
+  setTimeout(()=>map.invalidateSize(), 250);
 }
 function toggleLegendaDesktop(forcar){
   const el = document.querySelector('.map-legend');
@@ -7747,8 +7819,22 @@ function abrirCandidatoItbi(pontos, latlng){
   }
 }
 
+// Rastreia o popup de lote atualmente aberto, pra poder atualizar seu
+// conteúdo quando os dados de ITBI chegarem de forma assíncrona (ver
+// garantirItbiPontosCarregados / atualizarPopupLoteAberto).
+let _popupLoteAberto = null; // {sql, groupId, popup}
 function abrirPopupLote(sql, groupId, latlng){
-  L.popup({maxWidth:280}).setLatLng(latlng).setContent(lotePopupHTML(sql, groupId)).openOn(map);
+  const popup = L.popup({maxWidth:280}).setLatLng(latlng).setContent(lotePopupHTML(sql, groupId)).openOn(map);
+  _popupLoteAberto = {sql, groupId, popup};
+  popup.on('remove', () => {
+    if (_popupLoteAberto && _popupLoteAberto.popup === popup) _popupLoteAberto = null;
+  });
+  garantirItbiPontosCarregados().then(() => atualizarPopupLoteAberto());
+}
+function atualizarPopupLoteAberto(){
+  if (!_popupLoteAberto) return;
+  const {sql, groupId, popup} = _popupLoteAberto;
+  popup.setContent(lotePopupHTML(sql, groupId));
 }
 
 map.on('click', function(e){
