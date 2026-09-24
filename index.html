@@ -3306,18 +3306,23 @@ function _statusPorSobreposicaoDeLotes(cache, qidBase, lotesAtuais){
 }
 function corComposicao(key, corBase, lotesAtuais){
   const qidBase = _qidBaseDeSubId(key);
+  const herdado = _statusHerdadoViaVinculoPreCalc.get(key);
+
+  if (herdado && herdado.tipo==='prospeccao') return COR_PROSPECCAO;
   const status = PROSPECCAO_STATUS_CACHE[key] || _statusPorSobreposicaoDeLotes(PROSPECCAO_STATUS_CACHE, qidBase, lotesAtuais);
   if (status && (!lotesAtuais || lotesAtuais.every(l => status.lotes.includes(l)))) {
     return COR_PROSPECCAO;
   }
   // "Validar com o Ale" só aparece se a composição NÃO estiver em
   // prospecção — prospecção é um estado mais avançado, tem prioridade.
+  if (herdado && herdado.tipo==='ale') return COR_VALIDACAO_ALE;
   const validacao = VALIDACAO_ALE_CACHE[key] || _statusPorSobreposicaoDeLotes(VALIDACAO_ALE_CACHE, qidBase, lotesAtuais);
   if (validacao && (!lotesAtuais || lotesAtuais.every(l => validacao.lotes.includes(l)))) {
     return COR_VALIDACAO_ALE;
   }
   // "Baixa prioridade" vem depois — some se a composição já estiver em
   // prospecção ou aguardando validação, que são estados mais urgentes.
+  if (herdado && herdado.tipo==='baixa') return COR_BAIXA_PRIORIDADE;
   const baixaPrioridade = BAIXA_PRIORIDADE_CACHE[key] || _statusPorSobreposicaoDeLotes(BAIXA_PRIORIDADE_CACHE, qidBase, lotesAtuais);
   if (baixaPrioridade && (!lotesAtuais || lotesAtuais.every(l => baixaPrioridade.lotes.includes(l)))) {
     return COR_BAIXA_PRIORIDADE;
@@ -5970,9 +5975,21 @@ function statsCombinadoParaFicha(subIdAtual, qAtual, isCompacto){
 // consulta a esse mapa em vez de recalcular tudo de novo.
 let _statsVinculoPreCalc = new Map();   // "bairro::subId" -> stats combinados
 let _subIdsVinculadosPreCalc = new Map(); // "bairro::subId" -> Set("bairro::subId" de todo o grupo)
+// subId -> {tipo, dados} — status (prospecção/validação Ale/baixa
+// prioridade) que uma composição HERDA por estar vinculada a outra que
+// já tem esse status, mesmo sem ter o próprio registro. Precalculado
+// aqui (mesmo padrão de performance do _subIdsVinculadosPreCalc: resolver
+// vínculo do zero pra cada composição a cada render do mapa é o que já
+// deixou o app lento antes) — cobre o caso de um vínculo criado ANTES
+// dessa propagação existir, ou qualquer outra dessincronia entre o
+// vínculo e os status individuais (bug relatado pelo Matheus, quadra
+// 016.074: uma composição vinculada continuava verde/disponível mesmo a
+// outra já estando azul/em prospecção).
+let _statusHerdadoViaVinculoPreCalc = new Map();
 function _recalcularCachesVinculo(){
   _statsVinculoPreCalc = new Map();
   _subIdsVinculadosPreCalc = new Map();
+  _statusHerdadoViaVinculoPreCalc = new Map();
   const isCompacto = currentProfile === 'compacto';
   for (const [grupoId, dados] of Object.entries(VINCULOS_CACHE)) {
     const membros = (dados.membros||[]).map(m => {
@@ -5983,6 +6000,22 @@ function _recalcularCachesVinculo(){
       const preco = isCompacto ? (qm.precoLocalCompacto||VGV_PRECO[qm.bairro]||14000) : (qm.precoLocal||VGV_PRECO[qm.bairro]||14000);
       return {sub: subM, q: qm, bairro: m.bairro, preco};
     }).filter(Boolean);
+
+    // Status herdado: se QUALQUER membro do grupo já tem prospecção,
+    // validação Ale ou baixa prioridade, todos os outros passam a
+    // "enxergar" esse mesmo status na cor do mapa — mesma precedência de
+    // corComposicao (prospecção > validação Ale > baixa prioridade).
+    if (membros.length > 1) {
+      const subIdsDoGrupo = membros.map(m => m.sub.subId);
+      const acharDados = (cache) => { for (const s of subIdsDoGrupo) { if (cache[s]) return cache[s]; } return null; };
+      const dadosProsp = acharDados(PROSPECCAO_STATUS_CACHE);
+      const dadosAle = !dadosProsp ? acharDados(VALIDACAO_ALE_CACHE) : null;
+      const dadosBaixa = (!dadosProsp && !dadosAle) ? acharDados(BAIXA_PRIORIDADE_CACHE) : null;
+      const herdado = dadosProsp ? {tipo:'prospeccao', dados:dadosProsp}
+        : dadosAle ? {tipo:'ale', dados:dadosAle}
+        : dadosBaixa ? {tipo:'baixa', dados:dadosBaixa} : null;
+      if (herdado) subIdsDoGrupo.forEach(s => _statusHerdadoViaVinculoPreCalc.set(s, herdado));
+    }
 
     // Destaque no mapa: TODOS os membros resolvidos (ativos ou não) se
     // destacam juntos — não depende de terem score/VGV calculável.
@@ -6096,6 +6129,41 @@ function atualizarContadorVinculo(){
   const el = document.getElementById('vinculo-contador');
   if (el) el.textContent = `${_modoVinculoAtivo.selecionados.length} vinculada(s)`;
 }
+function _subCompletoPorId(subId, bairro){
+  const q = QUADRAS.find(x => x.id === subId.split('~')[0] && x.bairro === bairro);
+  if (!q) return null;
+  return getSubGroups(q).find(s => s.subId === subId) || null;
+}
+// Se alguma composição do vínculo já estava em prospecção / validação com
+// o Ale / baixa prioridade ANTES de virar vínculo, propaga esse status
+// pras outras assim que o vínculo é criado. Sem isso, o status só se
+// espalha quando alguém clica de novo em "Enviar Prospecção" (ou marca
+// Ale/baixa prioridade de novo) DEPOIS de já estar vinculado — a
+// composição que só ACABOU de entrar no grupo fica com a cor antiga
+// (disponível) mesmo já fazendo parte da mesma negociação, que foi
+// exatamente o bug relatado pelo Matheus na quadra 016.074.
+async function _propagarStatusExistenteAoVincular(todosMembros){
+  const acharDados = (cache) => { for (const m of todosMembros) { if (cache[m.subId]) return cache[m.subId]; } return null; };
+  // Mesma precedência de corComposicao: prospecção > validação Ale > baixa prioridade
+  const dadosProsp = acharDados(PROSPECCAO_STATUS_CACHE);
+  const dadosAle = !dadosProsp ? acharDados(VALIDACAO_ALE_CACHE) : null;
+  const dadosBaixa = (!dadosProsp && !dadosAle) ? acharDados(BAIXA_PRIORIDADE_CACHE) : null;
+  if (!dadosProsp && !dadosAle && !dadosBaixa) return;
+
+  for (const m of todosMembros) {
+    const sub = _subCompletoPorId(m.subId, m.bairro);
+    const lotes = sub ? sub.lotes : m.lotes;
+    const area = sub ? sub.area : null;
+    const base = {subId: m.subId, qid: m.subId.split('~')[0], bairro: m.bairro, lotes, area};
+    if (dadosProsp && !PROSPECCAO_STATUS_CACHE[m.subId]) {
+      await marcarProspeccaoAtiva(m.subId, {...dadosProsp, ...base}, true);
+    } else if (dadosAle && !VALIDACAO_ALE_CACHE[m.subId]) {
+      await marcarValidacaoAle(m.subId, {...dadosAle, ...base}, true);
+    } else if (dadosBaixa && !BAIXA_PRIORIDADE_CACHE[m.subId]) {
+      await marcarBaixaPrioridade(m.subId, {...dadosBaixa, ...base}, true);
+    }
+  }
+}
 async function concluirModoVinculo(){
   const m = _modoVinculoAtivo;
   if (!m) return;
@@ -6113,6 +6181,7 @@ async function concluirModoVinculo(){
   const grupoId = m.grupoIdExistente || `vinc_${Date.now()}`;
   const origemSubId = m.origemSubId, origemBairro = m.origemBairro;
   await salvarVinculo(grupoId, todosMembros);
+  await _propagarStatusExistenteAoVincular(todosMembros);
   _sairModoVinculo();
   renderQuadraMarkers(); renderQuadraList();
   mostrarToast('Vínculo salvo com sucesso.');
