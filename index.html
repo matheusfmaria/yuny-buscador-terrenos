@@ -672,6 +672,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
         <label class="check-row"><input type="checkbox" id="q-show-dificil" onchange="atualizarFiltroCategorias()"> 🟫 Difícil</label>
         <label class="check-row"><input type="checkbox" id="q-show-obras" onchange="atualizarFiltroCategorias()"> ⬜ Em obras</label>
         <label class="check-row"><input type="checkbox" id="q-show-naoedificavel" onchange="atualizarFiltroCategorias()"> ⬜ Não edificável</label>
+        <label class="check-row"><input type="checkbox" id="q-show-tombado" onchange="atualizarFiltroCategorias()"> ⬜ Bem tombado</label>
       </div>
       <div class="list-half">
       <div class="stats-bar">
@@ -772,12 +773,13 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <div class="lg-row"><div class="lg-dot" style="background:#1565c0"></div> Em prospecção</div>
       <div class="lg-row"><div class="lg-dot" style="background:#fbc02d"></div> Validar com o Ale</div>
       <div class="lg-row"><div class="lg-dot" style="background:#2e7d32"></div> Disponível — CA ≥ 4</div>
-      <div class="lg-row"><div class="lg-dot" style="background:#81c784"></div> Disponível — CA &lt; 4</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#81c784"></div> Disponível — CA &lt; 4 ou área envoltória/bairro ambiental</div>
       <div class="lg-row"><div class="lg-dot" style="background:#fb8c00"></div> Baixa prioridade</div>
       <div class="lg-row"><div class="lg-dot" style="background:#c62828"></div> Descarte ou lançamento futuro</div>
       <div class="lg-row"><div class="lg-dot" style="background:#8e24aa"></div> Sobreposta com lançamento (GeoImóvel)</div>
       <div class="lg-row"><div class="lg-dot" style="background:#8d6e63"></div> Difícil</div>
       <div class="lg-row"><div class="lg-dot" style="background:#9e9e9e"></div> Em obras ou não edificável</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#880e4f"></div> Bem tombado</div>
     </div>
     <div class="map-info" id="map-info">🗺 Carregando...</div>
     <!-- Botão de legenda (era no topbar) — logo acima do indicador de
@@ -2702,13 +2704,73 @@ let selectedSql=null, selectedQid=null, selectedSubId=null, selectedBairro=null,
 function zonaDoLote(qidBase, l, q) {
   return ZONA_LOTE[`${qidBase}.${l}`] || q.zona;
 }
+// ── Bens tombados / em processo de tombamento (SMC/DPH) ──────────────
+// Todo lote tombado ou em processo de tombamento NÃO pode ser considerado
+// pra fins de incorporação — pedido do Matheus: precisa ser tratado como
+// uma restrição automática (mesmo mecanismo de obras/difícil/etc, mas sem
+// edição manual), tirando o lote do cálculo de área/score/VGV da
+// composição ativa. Duas fontes, geradas a partir do GeoJSON oficial:
+// - tombamento_lotes.json: SQL exato -> dados (maioria dos casos, O(1))
+// - tombamento_areas.json: polígonos de área/ZEPEC sem lote específico
+//   (ex: tombamento de conjunto urbano) — precisa checar sobreposição
+//   geométrica com o lote, não dá pra casar só pelo SQL.
+let TOMBAMENTO_LOTES = {};
+let TOMBAMENTO_AREAS = [];
+async function carregarTombamento(){
+  try {
+    const [lotes, areas] = await Promise.all([
+      fetchComCache('pacotes_extra/tombamento_lotes.json'),
+      fetchComCache('pacotes_extra/tombamento_areas.json'),
+    ]);
+    TOMBAMENTO_LOTES = lotes || {};
+    TOMBAMENTO_AREAS = areas || [];
+  } catch(e) {
+    console.warn('Não foi possível carregar os dados de bens tombados:', e);
+  }
+}
+// Resultado cacheado por SQL — os dados de tombamento são estáticos (não
+// mudam durante a sessão, ao contrário de STATUS_LOTE_CACHE), então não
+// tem por que refazer a varredura de áreas pro mesmo lote duas vezes.
+const _tombamentoPorLoteCache = new Map();
+function loteEhTombado(sql){
+  if (_tombamentoPorLoteCache.has(sql)) return _tombamentoPorLoteCache.get(sql);
+  let resultado = TOMBAMENTO_LOTES[sql] || null;
+  if (!resultado && TOMBAMENTO_AREAS.length) {
+    const ring = LOTES_GEOM[sql];
+    if (ring && ring.length >= 3) {
+      const xs = ring.map(p=>p[0]), ys = ring.map(p=>p[1]);
+      const minX=Math.min(...xs), maxX=Math.max(...xs), minY=Math.min(...ys), maxY=Math.max(...ys);
+      const anelFechado = ring.slice();
+      const p0=anelFechado[0], pl=anelFechado[anelFechado.length-1];
+      if (p0[0]!==pl[0] || p0[1]!==pl[1]) anelFechado.push(p0);
+      let lotePoly = null;
+      for (const area of TOMBAMENTO_AREAS) {
+        const b = area.bbox;
+        // bbox não cruza — pula sem gastar tempo com interseção real
+        // (a maioria das ~2.500 áreas cai fora aqui, é o que mantém isso rápido)
+        if (maxX<b[0] || minX>b[2] || maxY<b[1] || minY>b[3]) continue;
+        try {
+          if (!lotePoly) lotePoly = turf.polygon([anelFechado]);
+          if (turf.booleanIntersects(lotePoly, turf.polygon(area.geometry.coordinates))) { resultado = area; break; }
+        } catch(e) { /* geometria com problema nesse par específico — ignora e segue tentando os outros */ }
+      }
+    }
+  }
+  _tombamentoPorLoteCache.set(sql, resultado);
+  return resultado;
+}
+// Ponto único de decisão do "status de restrição" de um lote — status
+// manual (STATUS_LOTE_CACHE) tem prioridade se já existir; tombamento é o
+// fallback automático, não editável, quando não há nada manual marcado.
+function statusRestricaoDoLote(sql){
+  const st = (STATUS_LOTE_CACHE[sql]||{}).status;
+  if (st) return st;
+  return loteEhTombado(sql) ? 'tombado' : null;
+}
+
 function getEffectiveLotes(q) {
   const qidBase = q.id.split('-')[0];
-  return q.lotes.filter(l => {
-    const sql = `${qidBase}.${l}`;
-    const st = STATUS_LOTE_CACHE[sql];
-    return !(st && st.status);
-  });
+  return q.lotes.filter(l => !statusRestricaoDoLote(`${qidBase}.${l}`));
 }
 function getEffectiveStats(q) {
   const efetivos = getEffectiveLotes(q);
@@ -2865,7 +2927,7 @@ function _calcularSubGroups(q) {
   // entrar no cálculo de "efetivos" acima.
   const todosNaoEfetivos = q.lotes.filter(l => !efetivos.includes(l));
   const statusPorLoteNE = {};
-  todosNaoEfetivos.forEach(l => { statusPorLoteNE[l] = (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status || 'restrito'; });
+  todosNaoEfetivos.forEach(l => { statusPorLoteNE[l] = statusRestricaoDoLote(`${qidBase}.${l}`) || 'restrito'; });
   const retiradosProspeccao = todosNaoEfetivos.filter(l => statusPorLoteNE[l] === 'retirado_prospeccao');
   const restritosDeVerdade = todosNaoEfetivos.filter(l => statusPorLoteNE[l] !== 'retirado_prospeccao');
 
@@ -2969,17 +3031,19 @@ const CORES_RESTRICAO = {
   dificil: '#8d6e63',
   futuro: '#c62828', descarte: '#c62828',
   retirado_prospeccao: '#78909c',
+  tombado: '#880e4f',
 };
 const LABEL_RESTRICAO = {
   obras: 'obras', naoedificavel: 'não edificável',
   dificil: 'difícil', futuro: 'futuro lanç.', descarte: 'descarte', restrito: 'restrito',
   retirado_prospeccao: 'retirado da composição',
+  tombado: 'bem tombado',
 };
 function corComposicaoRestrita(qidBase, lotes) {
   // cada subgrupo restrito agora é homogêneo (um tipo de restrição só —
   // ver getSubGroups), então o status do primeiro lote já representa
   // o grupo inteiro
-  const status = lotes.map(l => (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status).find(Boolean);
+  const status = lotes.map(l => statusRestricaoDoLote(`${qidBase}.${l}`)).find(Boolean);
   return CORES_RESTRICAO[status] || '#9e9e9e';
 }
 
@@ -4136,7 +4200,15 @@ function htmlListaRestricoesLotes(lotes, qidBase, groupId, bairro){
     const sql = `${qidBase}.${l}`;
     const stL = STATUS_LOTE_CACHE[sql] || {};
     const safeId = sql.replace(/\./g,'-');
+    const tomb = loteEhTombado(sql);
     return `<div style="border:1px solid #eee;border-radius:6px;padding:6px 8px;margin-bottom:6px">
+      ${tomb ? `<div style="background:#fce4ec;border:1px solid #880e4f;border-radius:5px;padding:6px 8px;margin-bottom:6px;font-size:11px;color:#4a0e2a;line-height:1.5">
+        🏛 <strong>${tomb.situacao==='TOMBADO'?'Bem tombado':'Em processo de tombamento'}</strong> — não pode ser considerado pra incorporação
+        ${tomb.endereco?`<br>📍 ${tomb.endereco}`:''}
+        ${tomb.nomeArea?`<br>🏘 ${tomb.nomeArea}`:''}
+        ${tomb.zepec?`<br>${tomb.zepec}${tomb.categoriaZepec?' — '+tomb.categoriaZepec:''}`:''}
+        ${tomb.link?`<br><a href="${tomb.link}" target="_blank" rel="noopener" style="color:#880e4f">Ver resolução</a>`:''}
+      </div>` : ''}
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap">
         <span style="font-family:monospace;font-size:11px;color:#555;min-width:90px">${sqlComDigito(sql)}</span>
         <button style="flex:1;font-size:10px;padding:3px 4px;border-radius:4px;border:1px solid #ddd;cursor:pointer;background:${stL.status==='obras'?'#8a8a8a':'#fff'};color:${stL.status==='obras'?'#fff':'#555'}"
@@ -4421,7 +4493,7 @@ async function saveLoteStatus(sql, status, obs) {
 // de uma composição de uma vez, em vez de precisar marcar lote a lote.
 // Mesmo padrão do descarte temporário por composição, só que pros status
 // que não têm motivo/prazo — aqui é só "aplicar a todos" ou "limpar todos".
-const ICONE_RESTRICAO = {obras:'🏗', dificil:'⚠️', futuro:'🏢', descarte:'🗂️', naoedificavel:'🌳', retirado_prospeccao:'↩️'};
+const ICONE_RESTRICAO = {obras:'🏗', dificil:'⚠️', futuro:'🏢', descarte:'🗂️', naoedificavel:'🌳', retirado_prospeccao:'↩️', tombado:'🏛'};
 let _obsRestricaoAtual = null;
 function abrirObsRestricaoComposicao(qidBase, lotes, status, groupId){
   _obsRestricaoAtual = {qidBase, lotes, status, groupId};
@@ -5473,6 +5545,16 @@ function lotePopupHTML(sql, groupId) {
     }
   }
   const dadosLoteHtml = `
+    ${(() => { const tomb = loteEhTombado(sql); return tomb ? `<div style="background:#fce4ec;border:1px solid #880e4f;border-radius:5px;padding:6px 8px;margin-bottom:6px;font-size:11px;color:#4a0e2a;line-height:1.5">
+      🏛 <strong>${tomb.situacao==='TOMBADO'?'Bem tombado':'Em processo de tombamento'}</strong> — não pode ser considerado pra incorporação
+      ${tomb.nomeArea?`<br>🏘 ${tomb.nomeArea}`:''}
+      ${tomb.link?`<br><a href="${tomb.link}" target="_blank" rel="noopener" style="color:#880e4f">Ver resolução</a>`:''}
+    </div>` : ''; })()}
+    ${(() => { const area = loteEmAreaProtegida(sql); return area ? `<div style="background:#e8f5e9;border:1px solid #81c784;border-radius:5px;padding:6px 8px;margin-bottom:6px;font-size:11px;color:#2e5c2e;line-height:1.5">
+      🌳 <strong>${area.label}</strong> — ponto de atenção, não impede incorporação
+      ${area.nome?`<br>${area.nome}`:''}
+      ${area.link?`<br><a href="${area.link}" target="_blank" rel="noopener" style="color:#2e7d32">Ver resolução</a>`:''}
+    </div>` : ''; })()}
     <div style="background:#f7f7f7;border-radius:5px;padding:6px 8px;margin-bottom:6px;font-size:11px;line-height:1.5">
       <div>👤 ${nomeProp
         ? `<strong>${escapeHtmlHistorico(nomeProp)}</strong>`
@@ -5655,7 +5737,7 @@ function renderLoteList() {
 let CATEGORIAS_VISIVEIS = new Set(['disponivel','prospeccao','baixa_prioridade','validar_ale','sobreposta']);
 function atualizarFiltroCategorias(){
   CATEGORIAS_VISIVEIS = new Set(
-    ['disponivel','prospeccao','baixa_prioridade','validar_ale','sobreposta','descarte','futuro','dificil','obras','naoedificavel']
+    ['disponivel','prospeccao','baixa_prioridade','validar_ale','sobreposta','descarte','futuro','dificil','obras','naoedificavel','tombado']
       .filter(cat => document.getElementById('q-show-'+cat)?.checked)
   );
   applyQFilters();
@@ -5668,8 +5750,8 @@ function atualizarFiltroCategorias(){
 function categoriaDoSub(q, sub){
   if (sub.tipo === 'restrito') {
     const qidBase = q.id.split('-')[0];
-    const statusPresentes = new Set(sub.lotes.map(l => (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status));
-    for (const cat of ['descarte','futuro','dificil','obras','naoedificavel']) {
+    const statusPresentes = new Set(sub.lotes.map(l => statusRestricaoDoLote(`${qidBase}.${l}`)));
+    for (const cat of ['descarte','futuro','dificil','obras','naoedificavel','tombado']) {
       if (statusPresentes.has(cat)) return cat;
     }
     return null;
@@ -5696,7 +5778,7 @@ function subPassaFiltrosNumericos(q, sub) {
     // outro Difícil) aparece se PELO MENOS UM dos status presentes
     // estiver marcado pra mostrar — só some quando NENHUM estiver.
     const qidBase = q.id.split('-')[0];
-    const statusPresentes = new Set(sub.lotes.map(l => (STATUS_LOTE_CACHE[`${qidBase}.${l}`]||{}).status));
+    const statusPresentes = new Set(sub.lotes.map(l => statusRestricaoDoLote(`${qidBase}.${l}`)));
     return [...statusPresentes].some(st => CATEGORIAS_VISIVEIS.has(st));
   }
   if (!CATEGORIAS_VISIVEIS.has(categoriaDoSub(q, sub))) return false;
@@ -5773,7 +5855,55 @@ function negSc(n) {
 // primeiro.
 const COR_DISPONIVEL_CA_ALTO = '#2e7d32';
 const COR_DISPONIVEL_CA_BAIXO = '#81c784';
-function corDisponivelPorCA(zona, ou){
+// ── Áreas envoltórias (CONDEPHAAT/CONPRESP/IPHAN) e Bairro Ambiental ──
+// Diferente do tombamento: NÃO é uma restrição, o lote continua podendo
+// ser incorporado normalmente. É só um "ponto de atenção" — pedido do
+// Matheus: aparecer em verde claro (mesma cor do CA baixo), mesmo que o
+// CA efetivo seja alto, porque esses fatores tornam a área um pouco
+// menos interessante sem torná-la descartável.
+let AREAS_PROTEGIDAS = [];
+async function carregarAreasProtegidas(){
+  try {
+    AREAS_PROTEGIDAS = await fetchComCache('pacotes_extra/areas_protegidas.json') || [];
+  } catch(e) {
+    console.warn('Não foi possível carregar as áreas envoltórias/bairro ambiental:', e);
+  }
+}
+const _areaProtegidaPorLoteCache = new Map();
+function loteEmAreaProtegida(sql){
+  if (_areaProtegidaPorLoteCache.has(sql)) return _areaProtegidaPorLoteCache.get(sql);
+  let resultado = null;
+  if (AREAS_PROTEGIDAS.length) {
+    const ring = LOTES_GEOM[sql];
+    if (ring && ring.length >= 3) {
+      const xs = ring.map(p=>p[0]), ys = ring.map(p=>p[1]);
+      const minX=Math.min(...xs), maxX=Math.max(...xs), minY=Math.min(...ys), maxY=Math.max(...ys);
+      const anelFechado = ring.slice();
+      const p0=anelFechado[0], pl=anelFechado[anelFechado.length-1];
+      if (p0[0]!==pl[0] || p0[1]!==pl[1]) anelFechado.push(p0);
+      let lotePoly = null;
+      for (const area of AREAS_PROTEGIDAS) {
+        const b = area.bbox;
+        if (maxX<b[0] || minX>b[2] || maxY<b[1] || minY>b[3]) continue;
+        try {
+          if (!lotePoly) lotePoly = turf.polygon([anelFechado]);
+          if (turf.booleanIntersects(lotePoly, turf.polygon(area.geometry.coordinates))) { resultado = area; break; }
+        } catch(e) { /* geometria com problema nesse par específico — ignora e segue tentando os outros */ }
+      }
+    }
+  }
+  _areaProtegidaPorLoteCache.set(sql, resultado);
+  return resultado;
+}
+function composicaoEmAreaProtegida(qidBase, lotes){
+  return lotes.some(l => loteEmAreaProtegida(`${qidBase}.${l}`));
+}
+// Cor "disponível": verde claro (mesmo tom do CA baixo) se a composição
+// cair numa área envoltória ou bairro ambiental, independente do CA real
+// — esse ponto de atenção pesa mais que o CA alto na hora de chamar
+// atenção visual, mas continua "disponível" (não é restrição).
+function corDisponivelPorCA(zona, ou, qidBase, lotes){
+  if (qidBase && lotes && composicaoEmAreaProtegida(qidBase, lotes)) return COR_DISPONIVEL_CA_BAIXO;
   return caEfetivo(zona, ou) >= 4 ? COR_DISPONIVEL_CA_ALTO : COR_DISPONIVEL_CA_BAIXO;
 }
 function scoreColor(score) {
@@ -6277,7 +6407,7 @@ function renderQuadraMarkers() {
       // 27 originais). Só cai pra união ao vivo dos lotes se, por algum
       // motivo, a composição não tiver entrada em GEOM_MAP (não deveria
       // acontecer, mas mantém o fallback por segurança).
-      const corBase = temEmpreendimentoSobreposto(q.id.split('-')[0], subs[0].lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : corDisponivelPorCA(subs[0].zona || q.zona, q.ou);
+      const corBase = temEmpreendimentoSobreposto(q.id.split('-')[0], subs[0].lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : corDisponivelPorCA(subs[0].zona || q.zona, q.ou, q.id.split('-')[0], subs[0].lotes);
       const c=corComposicao(q.id, corBase, subs[0].lotes);
       const sel=estaSelecionadoOuVinculado(q.id, q.bairro);
       let layer;
@@ -6318,7 +6448,7 @@ function renderQuadraMarkers() {
     subs.forEach(sub=>{
       if (!subPassaFiltrosNumericos(q, sub)) return;
       const restrito = sub.tipo==='restrito' && sub.statusRestricao!=='retirado_prospeccao';
-      const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : corDisponivelPorCA(sub.zona || q.zona, q.ou);
+      const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : corDisponivelPorCA(sub.zona || q.zona, q.ou, qidBase, sub.lotes);
       const c = corComposicao(sub.subId, restrito ? corComposicaoRestrita(qidBase, sub.lotes) : corBaseAtivo, sub.lotes);
       const sel=estaSelecionadoOuVinculado(sub.subId, q.bairro);
       const unioned = unionLotesPolygonCached(qidBase, sub.lotes);
@@ -7210,7 +7340,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       const qLayer = QUADRAS.find(x => x.id === st.parentId && x.bairro === layer._yunyBairro) || QUADRAS.find(x => x.id === st.parentId);
       const corBase = (st.tipo==='restrito' && st.statusRestricao!=='retirado_prospeccao')
         ? corComposicaoRestrita(qidBaseLayer, st.lotes)
-        : (temEmpreendimentoSobreposto(qidBaseLayer, st.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : corDisponivelPorCA(st.zona || (qLayer && qLayer.zona), qLayer && qLayer.ou));
+        : (temEmpreendimentoSobreposto(qidBaseLayer, st.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : corDisponivelPorCA(st.zona || (qLayer && qLayer.zona), qLayer && qLayer.ou, qidBaseLayer, st.lotes));
       const _c= corComposicao(layer._yunySubId, corBase, st.lotes);
       const _sel = estaSelecionadoOuVinculado(layer._yunySubId, layer._yunyBairro);
       const _style={color:_c,weight:_sel?2.5:1.5,fillColor:_c,fillOpacity:_sel?0.55:0.3,dashArray:_sel?null:'3,2'};
@@ -8367,7 +8497,7 @@ function iniciarApp(){
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
   const numDistritosIniciais = DISTRITOS_DISPONIVEIS.filter(d => DISTRITOS_INICIAIS.includes(d.distrito)).length;
-  _resetProgressoCarga(numDistritosIniciais + 11); // 11 = as outras tarefas do Promise.all abaixo
+  _resetProgressoCarga(numDistritosIniciais + 13); // 13 = as outras tarefas do Promise.all abaixo
 
   Promise.all([
     _comProgressoCarga(iniciarSincronizacaoLotes(), 'Sincronizando restrições…'),
@@ -8381,6 +8511,8 @@ function iniciarApp(){
     _comProgressoCarga(iniciarSincronizacaoBaixaPrioridade(), 'Sincronizando baixa prioridade…'),
     _comProgressoCarga(carregarItbiComparaveis(), 'Carregando comparáveis de ITBI…'),
     _comProgressoCarga(carregarProprietarios(), 'Carregando nomes de proprietários…'),
+    _comProgressoCarga(carregarTombamento(), 'Carregando bens tombados…'),
+    _comProgressoCarga(carregarAreasProtegidas(), 'Carregando áreas envoltórias…'),
     carregarDistritosIniciais(),
   ]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
