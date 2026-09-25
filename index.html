@@ -765,6 +765,9 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <div class="layer-row"><input type="checkbox" id="ly-geoimovel" onchange="toggleLayer('geoimovel')"><div class="layer-swatch" style="background:#8e24aa;border-radius:50%;width:10px;height:10px"></div><label for="ly-geoimovel">Empreendimentos (GeoImóvel)</label></div>
       <div class="layer-row"><input type="checkbox" id="ly-itbiPontos" onchange="toggleLayer('itbiPontos')"><div class="layer-swatch" style="background:#f59e0b;border:1px solid #b45309;border-radius:50%;width:10px;height:10px"></div><label for="ly-itbiPontos">Transações de ITBI (todas)</label></div>
       <div class="layer-row"><input type="checkbox" id="ly-loteGeosampa" onchange="toggleLayer('loteGeosampa')"><div class="layer-swatch" style="background:transparent;border:1.5px dashed #6d4c00"></div><label for="ly-loteGeosampa">Lotes oficiais (GeoSampa)</label></div>
+      <div class="layer-row"><input type="checkbox" id="ly-tombadoVisual" onchange="toggleLayer('tombadoVisual')"><div class="layer-swatch" style="background:rgba(136,14,79,.15);border:1.5px dashed #880e4f"></div><label for="ly-tombadoVisual">Bens tombados</label></div>
+      <div class="layer-row"><input type="checkbox" id="ly-areaEnvoltoria" onchange="toggleLayer('areaEnvoltoria')"><div class="layer-swatch" style="background:rgba(0,105,92,.12);border:1.5px dashed #00695c"></div><label for="ly-areaEnvoltoria">Áreas envoltórias (CONDEPHAAT/CONPRESP/IPHAN)</label></div>
+      <div class="layer-row"><input type="checkbox" id="ly-bairroAmbiental" onchange="toggleLayer('bairroAmbiental')"><div class="layer-swatch" style="background:rgba(46,125,50,.12);border:1.5px dashed #2e7d32"></div><label for="ly-bairroAmbiental">Bairros ambientais</label></div>
       <div class="layer-row" style="border-top:1px solid #eee;margin-top:6px;padding-top:8px"><input type="checkbox" id="ly-regioes" checked onchange="toggleCamadaRegioes()"><div class="layer-swatch" style="background:#5c6bc0;opacity:.35;border:1.5px dashed #5c6bc0"></div><label for="ly-regioes">Regiões disponíveis (<span id="contador-regioes-disponiveis">108</span>) — clique no mapa p/ carregar</label></div>
     </div>
 
@@ -2656,7 +2659,14 @@ const layers = {
   // Cluster (não layerGroup simples) — a camada de pontos de ITBI tem
   // ~29 mil marcadores; sem agrupar visualmente por zoom o navegador
   // travaria e o mapa ficaria ilegível de longe.
-  itbiPontos: L.markerClusterGroup({ maxClusterRadius: 60, chunkedLoading: true, spiderfyOnMaxZoom: false })
+  itbiPontos: L.markerClusterGroup({ maxClusterRadius: 60, chunkedLoading: true, spiderfyOnMaxZoom: false }),
+  // Camadas de referência visual (patrimônio cultural) — só desenham
+  // quando o usuário liga a camada; a restrição/ponto de atenção em si já
+  // funciona sem elas (ver loteEhTombado / loteEmAreaProtegida), essas
+  // camadas são só pra ENXERGAR o contorno oficial no mapa.
+  tombadoVisual: L.layerGroup(),
+  areaEnvoltoria: L.layerGroup(),
+  bairroAmbiental: L.layerGroup(),
 };
 
 let loteMarkers={}, quadraPolygons={}, zonaLayer=null, ouLayer=null;
@@ -6665,10 +6675,67 @@ function toggleLayer(name) {
     if(name==='ou') loadOULayer();
     if(name==='geoimovel') loadGeoImovelLayer();
     if(name==='itbiPontos') loadItbiPontosLayer();
+    if(name==='tombadoVisual') loadTombamentoVisualLayer();
+    if(name==='areaEnvoltoria') loadAreaEnvoltoriaLayer();
+    if(name==='bairroAmbiental') loadBairroAmbientalLayer();
     if(layers[name]) layers[name].addTo(map);
   } else {
     if(layers[name]) map.removeLayer(layers[name]);
   }
+}
+
+// === CAMADAS VISUAIS DE PATRIMÔNIO CULTURAL (referência, desligadas por padrão) ===
+// Bens tombados: TOMBAMENTO_LOTES (usado na lógica de restrição) não tem
+// geometria — foi enxugado de propósito pra ficar leve e rápido de casar
+// por SQL. Pra desenhar no mapa precisa da geometria de verdade, por isso
+// um arquivo à parte, carregado só quando essa camada é ligada.
+let tombadoVisualLoaded=false, tombadoVisualCarregando=false;
+async function loadTombamentoVisualLayer(){
+  if (tombadoVisualLoaded || tombadoVisualCarregando) return;
+  tombadoVisualCarregando = true;
+  mostrarToast('Carregando bens tombados…');
+  let dados;
+  try {
+    dados = await fetchComCache('pacotes_extra/tombamento_visual.json');
+  } catch(e) {
+    tombadoVisualCarregando = false;
+    mostrarToast('Não consegui carregar os bens tombados. Tente de novo.');
+    console.warn('Falha ao carregar tombamento visual:', e);
+    return;
+  }
+  tombadoVisualLoaded = true; tombadoVisualCarregando = false;
+  dados.forEach(entry => {
+    const cor = '#880e4f';
+    const poly = L.polygon(geomToLatLngs(entry.geometry), {color: cor, weight:1.5, fillColor: cor, fillOpacity:0.15, dashArray:'4,3'});
+    const titulo = `${entry.situacao==='TOMBADO'?'🏛 Bem tombado':'🏛 Em processo de tombamento'}`
+      + (entry.endereco ? `<br>${entry.endereco}` : '')
+      + (entry.nomeArea ? `<br>${entry.nomeArea}` : '');
+    poly.bindTooltip(titulo, {sticky:true});
+    poly.addTo(layers.tombadoVisual);
+  });
+}
+// Áreas envoltórias e bairros ambientais: geometria já vem no
+// AREAS_PROTEGIDAS carregado no boot (usado pra colorir a composição de
+// verde claro) — essas duas camadas só filtram por tipo e desenham, sem
+// precisar baixar nada de novo.
+let areaEnvoltoriaDesenhada=false, bairroAmbientalDesenhado=false;
+function _desenharAreaProtegida(entry, cor, layerGroup){
+  const poly = L.polygon(geomToLatLngs(entry.geometry), {color: cor, weight:1.5, fillColor: cor, fillOpacity:0.1, dashArray:'5,3'});
+  const titulo = entry.label + (entry.nome ? `<br>${entry.nome}` : '');
+  poly.bindTooltip(titulo, {sticky:true});
+  poly.addTo(layerGroup);
+}
+async function loadAreaEnvoltoriaLayer(){
+  if (areaEnvoltoriaDesenhada) return;
+  if (!AREAS_PROTEGIDAS.length) { mostrarToast('Carregando áreas envoltórias…'); await carregarAreasProtegidas(); }
+  areaEnvoltoriaDesenhada = true;
+  AREAS_PROTEGIDAS.filter(a => a.tipo !== 'bairro_ambiental').forEach(entry => _desenharAreaProtegida(entry, '#00695c', layers.areaEnvoltoria));
+}
+async function loadBairroAmbientalLayer(){
+  if (bairroAmbientalDesenhado) return;
+  if (!AREAS_PROTEGIDAS.length) { mostrarToast('Carregando bairros ambientais…'); await carregarAreasProtegidas(); }
+  bairroAmbientalDesenhado = true;
+  AREAS_PROTEGIDAS.filter(a => a.tipo === 'bairro_ambiental').forEach(entry => _desenharAreaProtegida(entry, '#2e7d32', layers.bairroAmbiental));
 }
 
 // === EMPREENDIMENTOS GEOIMÓVEL ===
