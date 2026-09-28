@@ -1263,7 +1263,78 @@ function dadosIptu(sql){
   };
 }
 
-function transacoesItbi(sql){ return ITBI_RAW[sql] || []; }
+// ── Histórico completo de ITBI (2006-2025, ainda vai vir 2026) ────────
+// Complementa o ITBI_RAW embutido (que só cobre ~2022+) SEM tocar nele —
+// o ITBI_RAW alimenta todasAmostrasItbi()/analisarVizinhancaItbi(), que é
+// a "Avaliação preliminar" (Valor de referência do ITBI/vizinhança), e o
+// Matheus pediu explicitamente pra não mudar nada ali. Este histórico
+// serve só a seção "Histórico de ITBI" da ficha, "Lotes contíguos desta
+// parte" e o popup de lote — nenhum deles lê todasAmostrasItbi().
+//
+// Formato compacto de cada transação: [d, v, vt, ct, mt, n] (array, não
+// objeto — cidade inteira dá 1,48 milhão de SQLs, nomear os campos por
+// extenso a cada transação inflaria o arquivo à toa). Convertido pra
+// objeto só na hora de exibir, em transacoesItbi().
+//
+// Carregado por "bucket" de 20 setores fiscais (pacotes_extra/
+// itbi_historico_XXX-YYY.json) — um município inteiro não cabe num
+// arquivo só (135MB brutos), e cada composição só precisa do bucket do
+// SEU setor, nunca de todos.
+const ITBI_HISTORICO_BUCKET_TAM = 20;
+let ITBI_HISTORICO = {};
+const _itbiHistoricoBucketsCarregados = new Set();
+const _itbiHistoricoBucketsCarregando = new Set();
+function _bucketDoSetor(setor){
+  const n = parseInt(setor, 10);
+  const ini = Math.floor(n / ITBI_HISTORICO_BUCKET_TAM) * ITBI_HISTORICO_BUCKET_TAM;
+  const fim = ini + ITBI_HISTORICO_BUCKET_TAM - 1;
+  return `${String(ini).padStart(3,'0')}-${String(fim).padStart(3,'0')}`;
+}
+// Garante que o bucket do setor de qidBase esteja carregado. Retorna true
+// se ISSO causou um carregamento novo (pra quem chamou saber se vale a
+// pena re-renderizar depois de esperar a promise).
+async function garantirItbiHistoricoCarregado(qidBase){
+  const setor = qidBase.split('.')[0];
+  const bucket = _bucketDoSetor(setor);
+  if (_itbiHistoricoBucketsCarregados.has(bucket)) return false;
+  if (_itbiHistoricoBucketsCarregando.has(bucket)) {
+    return new Promise(resolve => {
+      const espera = setInterval(() => {
+        if (!_itbiHistoricoBucketsCarregando.has(bucket)) { clearInterval(espera); resolve(false); }
+      }, 200);
+    });
+  }
+  _itbiHistoricoBucketsCarregando.add(bucket);
+  try {
+    const dados = await fetchComCache(`pacotes_extra/itbi_historico_${bucket}.json`);
+    Object.assign(ITBI_HISTORICO, dados);
+  } catch(e) {
+    console.warn(`Não consegui carregar o histórico de ITBI do bucket ${bucket}:`, e);
+  }
+  _itbiHistoricoBucketsCarregando.delete(bucket);
+  _itbiHistoricoBucketsCarregados.add(bucket);
+  return true;
+}
+function transacoesItbi(sql){
+  const doRaw = ITBI_RAW[sql] || [];
+  const doHistorico = (ITBI_HISTORICO[sql] || []).map(r => ({
+    d: r[0], v: r[1], vt: r[2]==null?undefined:r[2], ct: r[3]==null?undefined:r[3], mt: r[4]==null?undefined:r[4], n: r[5],
+  }));
+  if (!doHistorico.length) return doRaw;
+  // Combina as duas fontes com deduplicação — o período 2022-2025 existe
+  // nas duas (o ITBI_RAW embutido E o histórico novo), mesma transação
+  // não pode aparecer duas vezes na lista.
+  const vistos = new Set();
+  const combinado = [];
+  [...doRaw, ...doHistorico].forEach(r => {
+    const chave = `${r.d}|${r.v}|${r.mt||''}`;
+    if (vistos.has(chave)) return;
+    vistos.add(chave);
+    combinado.push(r);
+  });
+  combinado.sort((a,b) => b.d.localeCompare(a.d));
+  return combinado;
+}
 
 // ══════════════════════════════════════════════════════════════════════
 // ANÁLISE DE VIZINHANÇA DO ITBI — R$/m² de terreno pela região
@@ -5608,6 +5679,7 @@ function lotePopupHTML(sql, groupId) {
         <button onclick="salvarProprietario('${sql}')">Salvar</button>
       </div>` : ''}
       <div>📐 Terreno: ${areaTerreno!=null ? Math.round(areaTerreno).toLocaleString('pt-BR')+' m²' : '—'}${iptu ? ` · 🏢 Construído: ${Math.round(iptu.areaConstruida).toLocaleString('pt-BR')} m²` : ''}</div>
+      ${(() => { const ultimaT = transacoesItbi(sql)[0]; return (ultimaT && (ultimaT.ct||ultimaT.mt)) ? `<div>📜 ${ultimaT.ct?ultimaT.ct+'º Cartório de Registro de Imóveis':''}${ultimaT.ct&&ultimaT.mt?' · ':''}${ultimaT.mt?'matrícula '+ultimaT.mt:''}</div>` : ''; })()}
       <div style="margin-top:4px;padding-top:4px;border-top:1px solid #e5e5e5"><strong>Transações ITBI:</strong><br>${transacoesHtml}</div>
     </div>`;
 
@@ -7377,6 +7449,10 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     ? (QUADRAS.find(x=>x.id===qid && x.bairro===bairroHint) || QUADRAS.find(x=>x.id===qid))
     : QUADRAS.find(x=>x.id===qid);
   if(!q) return;
+  const qidBaseParaItbi = q.id.split('-')[0];
+  garantirItbiHistoricoCarregado(qidBaseParaItbi).then(carregouAgora => {
+    if (carregouAgora && selectedQid===qid) selectQuadra(qid, subId, true, bairroHint);
+  });
   const subs = getSubGroups(q);
   if (subs.length===0) { closeDetail(); return; } // todos os lotes restritos, nada a mostrar
   const activeSub = subs.find(s=>s.subId===subId) || subs[0];
@@ -7587,6 +7663,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
           <th style="text-align:left;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">SQL</th>
           <th style="text-align:left;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">Proprietário</th>
           <th style="text-align:right;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">Área (m²)</th>
+          <th style="text-align:left;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">Cartório / Matrícula</th>
         </tr></thead>
         <tbody>${(_combo
           ? _combo.gruposLotes.flatMap(g => g.lotes.map(l => g.qidBase+'.'+l))
@@ -7595,6 +7672,10 @@ function selectQuadra(qid, subId, manterView, bairroHint){
           const nome = nomeProprietario(sql);
           const safe = sql.replace(/\./g,'-');
           const areaLote = LOTES_AREA[sql];
+          const ultimaT = transacoesItbi(sql)[0];
+          const cartMat = ultimaT && (ultimaT.ct || ultimaT.mt)
+            ? `${ultimaT.ct?ultimaT.ct+'º RI':''}${ultimaT.ct&&ultimaT.mt?' · ':''}${ultimaT.mt?'mat. '+ultimaT.mt:''}`
+            : '—';
           return `<tr>
             <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2;font-family:monospace;white-space:nowrap">${sqlComDigito(sql)}</td>
             <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2">${nome
@@ -7606,6 +7687,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
                  </div>`
             }</td>
             <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2;text-align:right;white-space:nowrap">${areaLote!=null ? Math.round(areaLote).toLocaleString('pt-BR') : '—'}</td>
+            <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2;white-space:nowrap;color:#666;font-size:10.5px">${cartMat}</td>
           </tr>`;
         }).join('')}</tbody>
       </table>
@@ -7701,7 +7783,11 @@ function selectQuadra(qid, subId, manterView, bairroHint){
         const sql = `${qidBase}.${l}`;
         transacoesItbi(sql).forEach(t => linhas.push({sql, ...t}));
       });
-      if (!linhas.length) return '';
+      if (!linhas.length) return `
+    <div class="dp-sec">
+      <div class="dp-st">Histórico de ITBI</div>
+      <div style="font-size:11px;color:#90a4ae">Não houveram transações para este imóvel desde 01/01/2006</div>
+    </div>`;
       linhas.sort((a,b) => b.d.localeCompare(a.d));
       const fmtD = iso => iso.split('-').reverse().join('/');
       return `
@@ -8110,6 +8196,7 @@ function abrirPopupLote(sql, groupId, latlng){
     if (_popupLoteAberto && _popupLoteAberto.popup === popup) _popupLoteAberto = null;
   });
   garantirItbiPontosCarregados().then(() => atualizarPopupLoteAberto());
+  garantirItbiHistoricoCarregado(sql.split('.').slice(0,2).join('.')).then(() => atualizarPopupLoteAberto());
 }
 function atualizarPopupLoteAberto(){
   if (!_popupLoteAberto) return;
