@@ -663,7 +663,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
         <div class="fl" style="margin-top:8px">Ocultar restrições no mapa</div>
         <div class="fl" style="margin-top:8px">Mostrar no mapa</div>
         <label class="check-row"><input type="checkbox" id="q-show-disponivel" checked onchange="atualizarFiltroCategorias()"> 🟩 Disponível</label>
-        <label class="check-row"><input type="checkbox" id="q-show-prospeccao" checked onchange="atualizarFiltroCategorias()"> 🟦 Em prospecção</label>
+        <label class="check-row"><input type="checkbox" id="q-show-prospeccao" checked onchange="atualizarFiltroCategorias()"> 🟦 No pipeline</label>
         <label class="check-row"><input type="checkbox" id="q-show-baixa_prioridade" checked onchange="atualizarFiltroCategorias()"> 🟧 Baixa prioridade</label>
         <label class="check-row"><input type="checkbox" id="q-show-validar_ale" checked onchange="atualizarFiltroCategorias()"> 🟨 Validar com Ale</label>
         <label class="check-row"><input type="checkbox" id="q-show-sobreposta" checked onchange="atualizarFiltroCategorias()"> 🟪 Sobreposta com lançamento</label>
@@ -773,7 +773,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
 
     <div class="map-legend">
       <div class="lg-title">Composição</div>
-      <div class="lg-row"><div class="lg-dot" style="background:#1565c0"></div> Em prospecção</div>
+      <div class="lg-row"><div class="lg-dot" style="background:#1565c0"></div> No pipeline</div>
       <div class="lg-row"><div class="lg-dot" style="background:#fbc02d"></div> Validar com o Ale</div>
       <div class="lg-row"><div class="lg-dot" style="background:#2e7d32"></div> Disponível — CA ≥ 4</div>
       <div class="lg-row"><div class="lg-dot" style="background:#81c784"></div> Disponível — CA &lt; 4 ou área envoltória/bairro ambiental</div>
@@ -4303,7 +4303,7 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal, bairro){
   // Cobertura parcial: acontece quando algum lote foi retirado manualmente
   // da prospecção (removerLotesDaProspeccao encolhe status.lotes), mas a
   // composição física em si (definida pela adjacência dos lotes) continua
-  // a mesma — sem essa checagem, a ficha mostraria "Em prospecção" cheio
+  // a mesma — sem essa checagem, a ficha mostraria "No pipeline" cheio
   // mesmo com lotes já retirados, inconsistente com o mapa (ver corComposicao).
   const statusCobreTudo = status && lotes.every(l => status.lotes.includes(l));
   // junta o histórico do subId atual (pode ter sufixo "~N" de divisão por
@@ -4322,7 +4322,7 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal, bairro){
 
   const statusHtml = status ? `
     <div class="hist-box" style="border-color:#1565c0;background:#eef4fc">
-      <span class="badge-prospeccao">📧 Em prospecção${statusCobreTudo?'':' (parcial)'}</span>
+      <span class="badge-prospeccao">📧 No pipeline${statusCobreTudo?'':' (parcial)'}</span>
       ${statusCobreTudo?'':`<div style="font-size:10px;color:#8a6d1a;margin-top:4px">Só ${status.lotes.length} de ${lotes.length} lotes desta composição continuam na prospecção — os demais foram retirados manualmente e não aparecem mais em azul no mapa.</div>`}
       <div style="font-size:11px;color:#555;margin-top:6px">
         Com <strong>${escapeHtmlHistorico(status.corretor)}</strong> desde ${formatarDataHistorico(status.dataEnvio)}
@@ -4652,7 +4652,7 @@ async function abrirModalProspeccao(qid, subId, bairroHint){
   const sub = subs.find(s=>s.subId===subId) || subs[0];
   if (!sub) return;
 
-  _prospeccaoAtual = {q, sub, imagem: null};
+  _prospeccaoAtual = {q, sub, imagem: null, pipelineFeito: false};
 
   // Composições vinculadas: o e-mail de prospecção passa a refletir o
   // BLOCO inteiro — área total somada e todos os lotes de todas as
@@ -5452,36 +5452,69 @@ async function enviarProspeccao(){
     quadra: q.id, bairro: q.bairro, lotes: sub.lotes, area: sub.area,
     corretor: nome, email, corpo, data: new Date().toISOString(),
   });
-
-  // Marca a composição como "em prospecção" (fica azul no mapa) e registra
-  // a primeira linha do histórico dela — combinações repetidas (reenvio pra
-  // outro corretor, por ex.) atualizam o status mas mantêm o histórico todo
-  const dataEnvioISO = new Date().toISOString();
-  await marcarProspeccaoAtiva(sub.subId, {
-    subId: sub.subId, qid: q.id, bairro: q.bairro, lotes: sub.lotes, area: sub.area,
-    corretor: nome, email, dataEnvio: dataEnvioISO,
-  });
-  await adicionarHistoricoComposicao(sub.subId, `Enviado ao ${nome} para prospecção`, null);
-  renderQuadraMarkers(); renderQuadraList();
-  if (selectedQid===q.id) selectQuadra(q.id, sub.subId);
+  // NÃO marca mais como "no pipeline" aqui — pedido do Matheus: abrir o
+  // Outlook é só o primeiro passo do fluxo (Outlook → Pipeline →
+  // Concluído). Só "✓ Concluído" marca a composição de fato.
+  await adicionarHistoricoComposicao(sub.subId, `E-mail de prospecção enviado ao ${nome}`, null);
 
   statusEl.style.color = copiou ? '#2e7d32' : '#c62828';
   statusEl.textContent = copiou
-    ? `Outlook aberto! Cole (Ctrl+V) no corpo do e-mail — o texto${imagem?' e a imagem já vêm':' já vem'} formatado. Quando terminar, clique em "✓ Concluído".`
+    ? `Outlook aberto! Cole (Ctrl+V) no corpo do e-mail — o texto${imagem?' e a imagem já vêm':' já vem'} formatado. Em seguida, clique em "Enviar para o pipeline" e depois em "✓ Concluído".`
     : 'Outlook aberto! Não consegui copiar automaticamente — use o botão "📋 Copiar conteúdo" abaixo antes de colar.';
   btn.disabled = false;
 }
-// Marca a composição como "em prospecção" e fecha o modal — independente
-// de o e-mail ter sido de fato aberto/enviado pelo Outlook. Pedido do
-// Matheus: hoje o fluxo é "Abrir no Outlook" + "Cancelar" manualmente;
-// esse botão junta as duas coisas numa etapa só, sem depender do Outlook
-// ter aberto direito.
+// Abre o cadastro no sistema da Kamila (pipeline) já preenchido — segundo
+// passo do fluxo (era o botão separado "Enviar pro LandBank" na ficha;
+// agora vive dentro do próprio modal de prospecção, no mesmo lugar onde
+// os outros dois passos acontecem).
+async function enviarParaPipeline(){
+  if (!_prospeccaoAtual) return;
+  const {q, sub} = _prospeccaoAtual;
+  const nome = document.getElementById('presp-corretor-nome').value.trim();
+
+  const qidBase = q.id.split('-')[0];
+  const combo = statsCombinadoParaFicha(sub.subId, q, currentProfile==='compacto');
+  const gruposLotes = combo ? combo.gruposLotes : [{qidBase, lotes: sub.lotes}];
+  const sqls = gruposLotes.flatMap(g => g.lotes.map(l => sqlComDigito(`${g.qidBase}.${l}`)));
+  const area = Math.round(combo ? combo.area : sub.area);
+
+  const p = new URLSearchParams();
+  p.set('bairro', q.bairro);
+  p.set('area', String(area));
+  // O formulário dela foi especificado/testado com "sql" como valor ÚNICO
+  // (não uma lista) — manda o primeiro/principal lote nesse campo, e a
+  // lista completa (quando há mais de um lote) fica registrada na
+  // observação, pra nada se perder mesmo que ela só leia um SQL.
+  if (sqls.length) p.set('sql', sqls[0]);
+  if (nome) p.set('corretor', nome);
+  const obsLotes = sqls.length > 1 ? ` — Todos os lotes: ${sqls.join(', ')}` : '';
+  p.set('obs', `Quadra fiscal ${formatarQidExibicao(qidBase)} · ${sqls.length} lote(s) via Buscador de Terrenos${combo?' (composição combinada c/ vínculo)':''}${obsLotes}`);
+  p.set('fonte', 'matheus');
+
+  window.open('https://nnyuny.github.io/Yuny.terrenos/#novoterreno&' + p.toString(), '_blank');
+
+  _prospeccaoAtual.pipelineFeito = true;
+  await adicionarHistoricoComposicao(sub.subId, 'Enviado para o pipeline (sistema da Kamila)', null);
+  const statusEl = document.getElementById('presp-status');
+  statusEl.style.color = '#5c2d91';
+  statusEl.textContent = 'Pipeline aberto em outra aba. Quando terminar o cadastro lá, clique em "✓ Concluído" aqui.';
+}
+// Marca a composição como "no pipeline" (fica azul no mapa) e fecha o
+// modal. Terceiro e último passo do fluxo — confirma que os dois
+// anteriores (Outlook + Pipeline) já foram feitos; se o corretor ainda
+// não clicou em "Enviar para o pipeline" nesta sessão do modal, avisa
+// antes de deixar concluir mesmo assim (não bloqueia — só lembra).
 async function concluirProspeccao(){
   const nome = document.getElementById('presp-corretor-nome').value.trim();
   const email = document.getElementById('presp-corretor-email').value.trim();
   const corpo = document.getElementById('presp-corpo').value.trim();
   const statusEl = document.getElementById('presp-status');
   if (!nome || !email) { statusEl.textContent = 'Preencha o nome e o e-mail do corretor.'; statusEl.style.color='#c62828'; return; }
+
+  if (!_prospeccaoAtual.pipelineFeito) {
+    const continuar = confirm('Você ainda não clicou em "Enviar para o pipeline". Confirma que quer concluir mesmo assim?');
+    if (!continuar) return;
+  }
 
   const {q, sub} = _prospeccaoAtual;
   await salvarCorretor(nome, email);
@@ -5494,11 +5527,11 @@ async function concluirProspeccao(){
     subId: sub.subId, qid: q.id, bairro: q.bairro, lotes: sub.lotes, area: sub.area,
     corretor: nome, email, dataEnvio: dataEnvioISO,
   });
-  await adicionarHistoricoComposicao(sub.subId, `Enviado ao ${nome} para prospecção`, null);
+  await adicionarHistoricoComposicao(sub.subId, `Concluído — no pipeline (corretor: ${nome})`, null);
   renderQuadraMarkers(); renderQuadraList();
   if (selectedQid===q.id) selectQuadra(q.id, sub.subId);
   fecharModalProspeccao();
-  mostrarToast('Composição marcada como em prospecção.');
+  mostrarToast('Composição marcada como no pipeline.');
 }
 
 // ── LOTES INDIVIDUAIS NO MAPA (exibidos ao abrir ficha de composição) ─
@@ -6598,7 +6631,7 @@ function renderQuadraList() {
     return `
     <div class="qcard ${sel?'sel':''}" onclick="selectQuadra('${q.id}','${sub.subId}',false,'${q.bairro.replace(/'/g,"\\'")}')" style="${restrito?'opacity:0.75':''}">
       <div class="card-top">
-        <span class="card-id">Quadra ${sub.subId}${(PROSPECCAO_STATUS_CACHE[sub.subId] && sub.lotes.every(l=>PROSPECCAO_STATUS_CACHE[sub.subId].lotes.includes(l)))?' <span class="badge-prospeccao">📧 Prospecção</span>':''}${sub.dividido?(restrito?` <span style="font-size:9px;background:${corComposicaoRestrita(sub.parentId.split('-')[0],sub.lotes)};color:#fff;border-radius:3px;padding:1px 5px">${LABEL_RESTRICAO[sub.statusRestricao]||'restrito'}</span>`:` <span style="font-size:9px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 5px">parte ${sub.subId.split('~')[1]}</span>`):''}</span>
+        <span class="card-id">Quadra ${sub.subId}${(PROSPECCAO_STATUS_CACHE[sub.subId] && sub.lotes.every(l=>PROSPECCAO_STATUS_CACHE[sub.subId].lotes.includes(l)))?' <span class="badge-prospeccao">📧 Pipeline</span>':''}${sub.dividido?(restrito?` <span style="font-size:9px;background:${corComposicaoRestrita(sub.parentId.split('-')[0],sub.lotes)};color:#fff;border-radius:3px;padding:1px 5px">${LABEL_RESTRICAO[sub.statusRestricao]||'restrito'}</span>`:` <span style="font-size:9px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 5px">parte ${sub.subId.split('~')[1]}</span>`):''}</span>
         <span class="area-big">${(sub.area/1000).toFixed(1)}k m²</span>
       </div>
       <div class="card-meta">
@@ -7046,44 +7079,11 @@ function encerrarMedicao(){
   _medicao = null;
 }
 
-// Integração com o LandBank da Kamila (https://nnyuny.github.io/Yuny.terrenos/)
-// — abre o cadastro de "Novo Terreno" já preenchido. Segue o formato dela
-// EXATAMENTE como especificado e testado por ela (window.open direto,
-// síncrono, com a URL já pronta) — uma versão anterior fazia uma busca de
-// endereço (assíncrona) ANTES de montar a URL, o que atrasava o
-// window.open e parece ter sido a causa do link abrir mas não preencher
-// nada. Removida essa espera: o botão agora monta e abre o link na hora,
-// sem depender de nenhuma resposta de rede primeiro.
-function enviarProLandBank(qid, subId, bairroHint){
-  const q = (bairroHint && QUADRAS.find(x=>x.id===qid && x.bairro===bairroHint)) || QUADRAS.find(x=>x.id===qid);
-  if (!q) return;
-  const subs = getSubGroups(q);
-  const sub = subs.find(s=>s.subId===subId) || subs[0];
-  if (!sub) return;
-
-  const qidBase = q.id.split('-')[0];
-  const combo = statsCombinadoParaFicha(sub.subId, q, currentProfile==='compacto');
-  const gruposLotes = combo ? combo.gruposLotes : [{qidBase, lotes: sub.lotes}];
-  const sqls = gruposLotes.flatMap(g => g.lotes.map(l => sqlComDigito(`${g.qidBase}.${l}`)));
-  const area = Math.round(combo ? combo.area : sub.area);
-  const dadosProsp = PROSPECCAO_STATUS_CACHE[sub.subId];
-  const corretor = dadosProsp ? dadosProsp.corretor : '';
-
-  const p = new URLSearchParams();
-  p.set('bairro', q.bairro);
-  p.set('area', String(area));
-  // O formulário dela foi especificado/testado com "sql" como valor ÚNICO
-  // (não uma lista) — manda o primeiro/principal lote nesse campo, e a
-  // lista completa (quando há mais de um lote) fica registrada na
-  // observação, pra nada se perder mesmo que ela só leia um SQL.
-  if (sqls.length) p.set('sql', sqls[0]);
-  if (corretor) p.set('corretor', corretor);
-  const obsLotes = sqls.length > 1 ? ` — Todos os lotes: ${sqls.join(', ')}` : '';
-  p.set('obs', `Quadra fiscal ${formatarQidExibicao(qidBase)} · ${sqls.length} lote(s) via Buscador de Terrenos${combo?' (composição combinada c/ vínculo)':''}${obsLotes}`);
-  p.set('fonte', 'matheus');
-
-  window.open('https://nnyuny.github.io/Yuny.terrenos/#novoterreno&' + p.toString(), '_blank');
-}
+// A integração com o Pipeline da Kamila (https://nnyuny.github.io/Yuny.terrenos/)
+// agora vive em enviarParaPipeline(), dentro do fluxo do modal de
+// prospecção — ver mais acima. Não tem mais botão separado na ficha pra
+// isso (era "📤 Enviar pro LandBank"): faz parte do fluxo Outlook →
+// Pipeline → Concluído, todo dentro do mesmo modal.
 function abrirGoogleMaps(lat, lon){
   window.open(`https://www.google.com/maps/search/?api=1&query=${lat},${lon}`, '_blank');
 }
@@ -7475,8 +7475,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
       <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
-      <button class="act-btn" style="background:#5c2d91;color:#fff" onclick='enviarProLandBank("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📤 Enviar pro LandBank</button>
-      <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção</button>
+      <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção e/ou Pipeline</button>
       <button class="act-btn" style="border-color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#90a4ae'};color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#607d8b'}" onclick='toggleValidacaoAleUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${VALIDACAO_ALE_CACHE[_stats.subId]?"↩️ Remover validação com o Ale":"✅ Validar com o Ale"}</button>
       <button class="act-btn" style="border-color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#90a4ae'};color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#607d8b'}" onclick='toggleBaixaPrioridadeUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${BAIXA_PRIORIDADE_CACHE[_stats.subId]?"↩️ Remover baixa prioridade":"🔽 Baixa prioridade"}</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
@@ -7521,8 +7520,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
       <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
       <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
-      <button class="act-btn" style="background:#5c2d91;color:#fff" onclick='enviarProLandBank("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📤 Enviar pro LandBank</button>
-      <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção</button>
+      <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção e/ou Pipeline</button>
       <button class="act-btn" style="border-color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#90a4ae'};color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#607d8b'}" onclick='toggleValidacaoAleUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${VALIDACAO_ALE_CACHE[_stats.subId]?"↩️ Remover validação com o Ale":"✅ Validar com o Ale"}</button>
       <button class="act-btn" style="border-color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#90a4ae'};color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#607d8b'}" onclick='toggleBaixaPrioridadeUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${BAIXA_PRIORIDADE_CACHE[_stats.subId]?"↩️ Remover baixa prioridade":"🔽 Baixa prioridade"}</button>
       <button class="act-btn" style="border-color:#f9a825;color:#6d4c00" onclick="iniciarModoVinculo('${_stats.subId}','${q.bairro.replace(/'/g,"\\'")}')">🔗 Vincular a outra composição</button>
@@ -8329,7 +8327,7 @@ function construirDashboardProspeccao(){
 
   const cardsHtml = `
     <div class="dash-cards">
-      <div class="dash-card"><div class="n">${totalAtivas}</div><div class="l">Em prospecção</div></div>
+      <div class="dash-card"><div class="n">${totalAtivas}</div><div class="l">No pipeline</div></div>
       <div class="dash-card ${totalAlerta?'alerta':''}"><div class="n">${totalAlerta}</div><div class="l">Sem retorno há +${DIAS_ALERTA_PROSPECCAO} dias</div></div>
       <div class="dash-card"><div class="n">${(areaTotal/1000).toFixed(1)}k</div><div class="l">m² em negociação</div></div>
     </div>`;
@@ -8690,6 +8688,7 @@ iniciarAutenticacao();
       <button class="presp-btn-cancel" onclick="fecharModalProspeccao()">Cancelar</button>
       <button class="presp-btn-cancel" onclick="copiarCorpoEmailParaClipboard().then(ok=>mostrarToast(ok?'Conteúdo copiado! Cole (Ctrl+V) no corpo do e-mail.':'Não foi possível copiar.'))">📋 Copiar conteúdo</button>
       <button class="presp-btn-send" id="presp-btn-enviar" onclick="enviarProspeccao()">Abrir no Outlook</button>
+      <button class="presp-btn-send" style="background:#5c2d91" onclick="enviarParaPipeline()">📤 Enviar para o pipeline</button>
       <button class="presp-btn-send" style="background:#2e7d32" onclick="concluirProspeccao()">✓ Concluído</button>
     </div>
     <div class="presp-status" id="presp-status"></div>
