@@ -2907,6 +2907,39 @@ async function carregarTombamento(){
 // mudam durante a sessão, ao contrário de STATUS_LOTE_CACHE), então não
 // tem por que refazer a varredura de áreas pro mesmo lote duas vezes.
 const _tombamentoPorLoteCache = new Map();
+// Índice espacial (grade) compartilhado por tombamento e área protegida —
+// sem isso, CADA lote da cidade (~1,6 milhão) faria uma varredura linear
+// nas ~2.500 áreas de tombamento e ~770 de área protegida só pra ver se
+// alguma bbox cruza. Multiplicado pela cidade inteira isso passa de bilhões
+// de comparações e trava a aba sozinho, mesmo com o desenho do mapa já
+// dividido em lotes — o gargalo real era aqui, não nos polígonos do Leaflet.
+const AREA_GRID_CELULA = 0.02; // ~2,2km
+function _construirGradeDeAreas(areas){
+  const grade = new Map();
+  for (const area of areas) {
+    const [minX,minY,maxX,maxY] = area.bbox;
+    const cyMin=Math.floor(minY/AREA_GRID_CELULA), cyMax=Math.floor(maxY/AREA_GRID_CELULA);
+    const cxMin=Math.floor(minX/AREA_GRID_CELULA), cxMax=Math.floor(maxX/AREA_GRID_CELULA);
+    for (let cy=cyMin; cy<=cyMax; cy++) for (let cx=cxMin; cx<=cxMax; cx++) {
+      const chave = cy+','+cx;
+      if (!grade.has(chave)) grade.set(chave, []);
+      grade.get(chave).push(area);
+    }
+  }
+  return grade;
+}
+function _candidatosDaGrade(grade, minX, minY, maxX, maxY){
+  const cyMin=Math.floor(minY/AREA_GRID_CELULA), cyMax=Math.floor(maxY/AREA_GRID_CELULA);
+  const cxMin=Math.floor(minX/AREA_GRID_CELULA), cxMax=Math.floor(maxX/AREA_GRID_CELULA);
+  const vistos = new Set(), resultado = [];
+  for (let cy=cyMin; cy<=cyMax; cy++) for (let cx=cxMin; cx<=cxMax; cx++) {
+    const bucket = grade.get(cy+','+cx);
+    if (!bucket) continue;
+    for (const a of bucket) if (!vistos.has(a)) { vistos.add(a); resultado.push(a); }
+  }
+  return resultado;
+}
+let _gradeTombamentoAreas = null;
 function loteEhTombado(sql){
   if (_tombamentoPorLoteCache.has(sql)) return _tombamentoPorLoteCache.get(sql);
   let resultado = TOMBAMENTO_LOTES[sql] || null;
@@ -2918,12 +2951,9 @@ function loteEhTombado(sql){
       const anelFechado = ring.slice();
       const p0=anelFechado[0], pl=anelFechado[anelFechado.length-1];
       if (p0[0]!==pl[0] || p0[1]!==pl[1]) anelFechado.push(p0);
+      if (!_gradeTombamentoAreas) _gradeTombamentoAreas = _construirGradeDeAreas(TOMBAMENTO_AREAS);
       let lotePoly = null;
-      for (const area of TOMBAMENTO_AREAS) {
-        const b = area.bbox;
-        // bbox não cruza — pula sem gastar tempo com interseção real
-        // (a maioria das ~2.500 áreas cai fora aqui, é o que mantém isso rápido)
-        if (maxX<b[0] || minX>b[2] || maxY<b[1] || minY>b[3]) continue;
+      for (const area of _candidatosDaGrade(_gradeTombamentoAreas, minX, minY, maxX, maxY)) {
         try {
           if (!lotePoly) lotePoly = turf.polygon([anelFechado]);
           if (turf.booleanIntersects(lotePoly, turf.polygon(area.geometry.coordinates))) { resultado = area; break; }
@@ -6078,6 +6108,7 @@ async function carregarAreasProtegidas(){
   }
 }
 const _areaProtegidaPorLoteCache = new Map();
+let _gradeAreasProtegidas = null;
 function loteEmAreaProtegida(sql){
   if (_areaProtegidaPorLoteCache.has(sql)) return _areaProtegidaPorLoteCache.get(sql);
   let resultado = null;
@@ -6089,10 +6120,9 @@ function loteEmAreaProtegida(sql){
       const anelFechado = ring.slice();
       const p0=anelFechado[0], pl=anelFechado[anelFechado.length-1];
       if (p0[0]!==pl[0] || p0[1]!==pl[1]) anelFechado.push(p0);
+      if (!_gradeAreasProtegidas) _gradeAreasProtegidas = _construirGradeDeAreas(AREAS_PROTEGIDAS);
       let lotePoly = null;
-      for (const area of AREAS_PROTEGIDAS) {
-        const b = area.bbox;
-        if (maxX<b[0] || minX>b[2] || maxY<b[1] || minY>b[3]) continue;
+      for (const area of _candidatosDaGrade(_gradeAreasProtegidas, minX, minY, maxX, maxY)) {
         try {
           if (!lotePoly) lotePoly = turf.polygon([anelFechado]);
           if (turf.booleanIntersects(lotePoly, turf.polygon(area.geometry.coordinates))) { resultado = area; break; }
