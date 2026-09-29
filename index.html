@@ -2472,17 +2472,26 @@ async function _cacheSet(chave, valor){
 // IMEDIATAMENTE (sem esperar a rede) e atualiza o cache em segundo plano
 // pra próxima vez. Sem cópia salva (primeira visita, ou cache limpo),
 // busca normal da rede e já guarda pra próxima.
-async function fetchComCache(url){
+async function fetchComCache(url, timeoutMs=20000){
   const cacheado = await _cacheGet(url);
   if (cacheado) {
     fetch(url).then(r => r.ok ? r.json() : null).then(dados => { if (dados) _cacheSet(url, dados); }).catch(()=>{});
     return cacheado;
   }
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error('HTTP '+resp.status);
-  const dados = await resp.json();
-  _cacheSet(url, dados);
-  return dados;
+  // Sem isso, uma conexão que trava (não dá erro, só nunca responde) deixa
+  // o fetch pendurado indefinidamente — e como isso roda dentro de um
+  // Promise.all do boot, o app inteiro nunca termina de abrir.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, {signal: controller.signal});
+    if (!resp.ok) throw new Error('HTTP '+resp.status);
+    const dados = await resp.json();
+    _cacheSet(url, dados);
+    return dados;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function carregarDistritosIniciais(){
@@ -3548,6 +3557,17 @@ function _definirProgressoCarga(fracao, rotulo){
 // Encadeia numa promessa existente (uma sincronização, etc.) sem mudar o
 // valor resolvido — só marca "mais uma etapa concluída" quando ela termina,
 // dê certo ou errado (uma sincronização que falha ainda assim "termina").
+// Corre uma promessa contra um limite de tempo — se estourar, segue em
+// frente (sem travar o boot) e só avisa no console. A tarefa original
+// continua rodando em segundo plano e ainda faz efeito quando/se terminar
+// (ex: um listener do Firebase que só demorou, não quebrou de verdade);
+// só o BOOT não fica mais esperando por ela pra sempre.
+function _comTimeout(promessa, ms, nome){
+  return Promise.race([
+    promessa,
+    new Promise(resolve => setTimeout(() => { console.warn(`Tempo esgotado esperando: ${nome} (${ms/1000}s) — seguindo sem essa etapa por ora.`); resolve(); }, ms)),
+  ]);
+}
 function _comProgressoCarga(promessa, rotulo){
   return promessa.then(
     r => { _incrementarProgressoCarga(rotulo); return r; },
@@ -8855,20 +8875,20 @@ function iniciarApp(){
   carregarItbiVizinhanca(); // segundo plano — não bloqueia a abertura do app (ver comentário na função)
 
   Promise.all([
-    _comProgressoCarga(iniciarSincronizacaoLotes(), 'Sincronizando restrições…'),
-    _comProgressoCarga(iniciarSincronizacaoProspeccao(), 'Sincronizando prospecções…'),
-    _comProgressoCarga(iniciarSincronizacaoDescarte(), 'Sincronizando descartes…'),
-    _comProgressoCarga(iniciarSincronizacaoFuturo(), 'Sincronizando futuros lançamentos…'),
-    _comProgressoCarga(iniciarSincronizacaoProprietarios(), 'Sincronizando proprietários…'),
-    _comProgressoCarga(iniciarSincronizacaoEmpreendimentoIgnorado(), 'Sincronizando empreendimentos ignorados…'),
-    _comProgressoCarga(iniciarSincronizacaoVinculos(), 'Sincronizando vínculos…'),
-    _comProgressoCarga(iniciarSincronizacaoValidacaoAle(), 'Sincronizando validações…'),
-    _comProgressoCarga(iniciarSincronizacaoBaixaPrioridade(), 'Sincronizando baixa prioridade…'),
-    _comProgressoCarga(carregarItbiComparaveis(), 'Carregando comparáveis de ITBI…'),
-    _comProgressoCarga(carregarProprietarios(), 'Carregando nomes de proprietários…'),
-    _comProgressoCarga(carregarTombamento(), 'Carregando bens tombados…'),
-    _comProgressoCarga(carregarAreasProtegidas(), 'Carregando áreas envoltórias…'),
-    carregarDistritosIniciais(),
+    _comProgressoCarga(_comTimeout(iniciarSincronizacaoLotes(), 25000, 'lotes_status'), 'Sincronizando restrições…'),
+    _comProgressoCarga(_comTimeout(iniciarSincronizacaoProspeccao(), 25000, 'prospeccao_status'), 'Sincronizando prospecções…'),
+    _comProgressoCarga(_comTimeout(iniciarSincronizacaoDescarte(), 25000, 'descarte_status'), 'Sincronizando descartes…'),
+    _comProgressoCarga(_comTimeout(iniciarSincronizacaoFuturo(), 25000, 'futuro_status'), 'Sincronizando futuros lançamentos…'),
+    _comProgressoCarga(_comTimeout(iniciarSincronizacaoProprietarios(), 25000, 'proprietarios_cache'), 'Sincronizando proprietários…'),
+    _comProgressoCarga(_comTimeout(iniciarSincronizacaoEmpreendimentoIgnorado(), 25000, 'empreendimento_ignorado'), 'Sincronizando empreendimentos ignorados…'),
+    _comProgressoCarga(_comTimeout(iniciarSincronizacaoVinculos(), 25000, 'vinculos'), 'Sincronizando vínculos…'),
+    _comProgressoCarga(_comTimeout(iniciarSincronizacaoValidacaoAle(), 25000, 'validacao_ale_status'), 'Sincronizando validações…'),
+    _comProgressoCarga(_comTimeout(iniciarSincronizacaoBaixaPrioridade(), 25000, 'baixa_prioridade_status'), 'Sincronizando baixa prioridade…'),
+    _comProgressoCarga(_comTimeout(carregarItbiComparaveis(), 25000, 'itbi_comparaveis.json'), 'Carregando comparáveis de ITBI…'),
+    _comProgressoCarga(_comTimeout(carregarProprietarios(), 25000, 'proprietarios.json'), 'Carregando nomes de proprietários…'),
+    _comProgressoCarga(_comTimeout(carregarTombamento(), 25000, 'tombamento_*.json'), 'Carregando bens tombados…'),
+    _comProgressoCarga(_comTimeout(carregarAreasProtegidas(), 25000, 'areas_protegidas.json'), 'Carregando áreas envoltórias…'),
+    _comTimeout(carregarDistritosIniciais(), 40000, 'distritos iniciais'),
   ]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
     await repararProspeccoesAposUnificacao(); // corrige prospecções gravadas antes da unificação de quadras
