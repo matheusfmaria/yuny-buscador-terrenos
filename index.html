@@ -2492,16 +2492,18 @@ async function carregarDistrito(nomeDistrito, opcoes={}){
   try {
     const pacote = await fetchComCache(info.arquivo);
     const nQuadras = mesclarPacoteDistrito(pacote);
-    // O distrito recém-chegado pode conter a outra metade de uma quadra de
-    // divisa que já estava carregada — reunir na hora evita que ela apareça
-    // duas vezes no mapa.
-    unificarQuadrasDuplicadas();
-    // Mesmo motivo do reparo que roda uma vez no boot (ver
-    // repararProspeccoesAposUnificacao): se este distrito não estava entre
-    // os pré-carregados, qualquer prospecção gravada sob um subId que
-    // mudou de nome (reagrupamento dinâmico) só pode ser corrigida agora,
-    // que os dados dele finalmente existem em QUADRAS/getSubGroups.
-    await repararProspeccoesAposUnificacao();
+    if (!opcoes.pularUnificacao) {
+      // O distrito recém-chegado pode conter a outra metade de uma quadra de
+      // divisa que já estava carregada — reunir na hora evita que ela apareça
+      // duas vezes no mapa.
+      unificarQuadrasDuplicadas();
+      // Mesmo motivo do reparo que roda uma vez no boot (ver
+      // repararProspeccoesAposUnificacao): se este distrito não estava entre
+      // os pré-carregados, qualquer prospecção gravada sob um subId que
+      // mudou de nome (reagrupamento dinâmico) só pode ser corrigida agora,
+      // que os dados dele finalmente existem em QUADRAS/getSubGroups.
+      await repararProspeccoesAposUnificacao();
+    }
 
     // invalida caches que dependiam do conjunto de dados anterior
     _avalScoreCache.clear();
@@ -2532,11 +2534,21 @@ async function carregarTodosOsBairros(){
   if (!faltando.length) { mostrarToast('Todos os bairros já estão carregados.'); return; }
 
   document.getElementById('carga-overlay').style.display = 'flex';
-  _resetProgressoCarga(faltando.length);
+  // +1: a etapa de unificação/reparo no final, que agora só roda uma vez
+  // (rodar a cada distrito é o que travava o navegador — ver comentário
+  // em carregarDistrito) mas ainda merece aparecer na barra de progresso.
+  _resetProgressoCarga(faltando.length + 1);
   for (const info of faltando) {
-    await carregarDistrito(info.distrito, {silencioso: true});
+    await carregarDistrito(info.distrito, {silencioso: true, pularUnificacao: true});
     _incrementarProgressoCarga(`${info.bairro} carregado`);
+    // Devolve o controle ao navegador entre um distrito e outro — sem isso,
+    // a sequência inteira roda como um bloco síncrono só, e o Chrome chega
+    // a mostrar o aviso de "página não está respondendo" no meio do caminho.
+    await new Promise(r => setTimeout(r, 0));
   }
+  _incrementarProgressoCarga('Organizando quadras de divisa entre bairros…');
+  unificarQuadrasDuplicadas();
+  await repararProspeccoesAposUnificacao();
   document.getElementById('carga-overlay').style.display = 'none';
   applyQFilters();
   mostrarToast('Todos os bairros foram carregados!');
