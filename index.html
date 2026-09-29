@@ -555,9 +555,6 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
   <div class="tb-right">
     <span id="total-badge" class="tb-sub"></span>
     <span id="user-chip"><span class="nome" id="user-nome"></span><button onclick="sairDaConta()">Sair</button></span>
-    <button class="btn" id="btn-dashboard-prosp" onclick="abrirDashboardProspeccao()" style="position:relative">
-      📊 Prospecções<span id="dash-badge-count"></span>
-    </button>
     <button class="btn" id="btn-dashboard-ale" onclick="abrirDashboardValidacaoAle()" style="position:relative;border-color:#fbc02d;color:#8d6e00">
       ✅ Validar com Ale<span id="dash-ale-badge-count"></span>
     </button>
@@ -769,6 +766,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <div class="layer-row"><input type="checkbox" id="ly-areaEnvoltoria" onchange="toggleLayer('areaEnvoltoria')"><div class="layer-swatch" style="background:rgba(0,105,92,.12);border:1.5px dashed #00695c"></div><label for="ly-areaEnvoltoria">Áreas envoltórias (CONDEPHAAT/CONPRESP/IPHAN)</label></div>
       <div class="layer-row"><input type="checkbox" id="ly-bairroAmbiental" onchange="toggleLayer('bairroAmbiental')"><div class="layer-swatch" style="background:rgba(46,125,50,.12);border:1.5px dashed #2e7d32"></div><label for="ly-bairroAmbiental">Bairros ambientais</label></div>
       <div class="layer-row" style="border-top:1px solid #eee;margin-top:6px;padding-top:8px"><input type="checkbox" id="ly-regioes" checked onchange="toggleCamadaRegioes()"><div class="layer-swatch" style="background:#5c6bc0;opacity:.35;border:1.5px dashed #5c6bc0"></div><label for="ly-regioes">Regiões disponíveis (<span id="contador-regioes-disponiveis">108</span>) — clique no mapa p/ carregar</label></div>
+      <button class="btn" style="width:100%;margin-top:6px;font-size:11.5px" onclick="carregarTodosOsBairros()">🗺️ Exibir todos os bairros</button>
     </div>
 
     <div class="map-legend">
@@ -2482,14 +2480,14 @@ async function carregarDistritosIniciais(){
   if (falhas) mostrarToast(`${falhas} região(ões) inicial(is) não carregaram — clique no perímetro pra tentar de novo.`);
 }
 
-async function carregarDistrito(nomeDistrito){
+async function carregarDistrito(nomeDistrito, opcoes={}){
   if (regioesCarregadas.has(nomeDistrito) || _carregandoRegiao) return;
   const info = DISTRITOS_DISPONIVEIS.find(d => d.distrito === nomeDistrito);
   if (!info) return;
 
   _carregandoRegiao = nomeDistrito;
   marcarPerimetroCarregando(nomeDistrito, true);
-  mostrarToast(`Carregando ${info.bairro}…`);
+  if (!opcoes.silencioso) mostrarToast(`Carregando ${info.bairro}…`);
 
   try {
     const pacote = await fetchComCache(info.arquivo);
@@ -2514,15 +2512,34 @@ async function carregarDistrito(nomeDistrito){
     removerPerimetro(nomeDistrito);   // o perímetro sai; os dados reais entram no lugar
     atualizarContadorRegioes();
 
-    applyQFilters();
-    map.flyTo([info.lat, info.lon], 14, {duration: 1.2});
-    mostrarToast(`${info.bairro} carregado — ${nQuadras.toLocaleString('pt-BR')} quadras.`);
+    if (!opcoes.silencioso) {
+      applyQFilters();
+      map.flyTo([info.lat, info.lon], 14, {duration: 1.2});
+      mostrarToast(`${info.bairro} carregado — ${nQuadras.toLocaleString('pt-BR')} quadras.`);
+    }
   } catch (e) {
     _carregandoRegiao = null;
     marcarPerimetroCarregando(nomeDistrito, false);
-    mostrarToast(`Não consegui carregar ${info.bairro}. Verifique a conexão e tente de novo.`);
+    if (!opcoes.silencioso) mostrarToast(`Não consegui carregar ${info.bairro}. Verifique a conexão e tente de novo.`);
     console.warn('Falha ao carregar região:', nomeDistrito, e);
   }
+}
+// Carrega todos os bairros que ainda faltam de uma vez, com a mesma barra
+// de progresso do login — pedido do Matheus pra não precisar clicar
+// distrito por distrito no mapa quando quiser ver a cidade inteira.
+async function carregarTodosOsBairros(){
+  const faltando = DISTRITOS_DISPONIVEIS.filter(d => !regioesCarregadas.has(d.distrito));
+  if (!faltando.length) { mostrarToast('Todos os bairros já estão carregados.'); return; }
+
+  document.getElementById('carga-overlay').style.display = 'flex';
+  _resetProgressoCarga(faltando.length);
+  for (const info of faltando) {
+    await carregarDistrito(info.distrito, {silencioso: true});
+    _incrementarProgressoCarga(`${info.bairro} carregado`);
+  }
+  document.getElementById('carga-overlay').style.display = 'none';
+  applyQFilters();
+  mostrarToast('Todos os bairros foram carregados!');
 }
 
 function atualizarContadorRegioes(){
@@ -8639,8 +8656,10 @@ function atualizarDashboardProspeccaoSeAberto(){
   const alertaFuturo = listaFuturoLancamentoAgrupada().length;
   const totalAlerta = alertaProspeccao + alertaFuturo;
   const badge = document.getElementById('dash-badge-count');
-  badge.classList.toggle('show', totalAlerta>0);
-  badge.textContent = totalAlerta;
+  if (badge) {
+    badge.classList.toggle('show', totalAlerta>0);
+    badge.textContent = totalAlerta;
+  }
 }
 // IMPORTANTE: o bairro é obrigatório pra desambiguar. Existem quadras com
 // o MESMO código em bairros diferentes (ex: 014.019 existe em Cerqueira
@@ -8721,7 +8740,6 @@ function iniciarApp(){
     applyFilters();
     atualizarFiltroCategorias(); // já chama applyQFilters() internamente — aplica de fato os checkboxes marcados por padrão
     carregarCorretores();
-    abrirDashboardProspeccao(); // toda vez que o sistema abre, mostra o resumo
     atualizarDashboardProspeccaoSeAberto();
     atualizarDashboardValidacaoAleSeAberto();
     document.getElementById('carga-overlay').style.display = 'none';
