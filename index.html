@@ -2549,8 +2549,28 @@ async function carregarTodosOsBairros(){
   _incrementarProgressoCarga('Organizando quadras de divisa entre bairros…');
   unificarQuadrasDuplicadas();
   await repararProspeccoesAposUnificacao();
+
+  // A partir daqui é só desenho — recalcula quais quadras aparecem com os
+  // filtros atuais (rápido) e depois desenha os polígonos em lotes, com
+  // pausas entre eles. Criar dezenas de milhares de polígonos do Leaflet
+  // numa passada síncrona só é pesado o bastante pra travar a aba sozinho,
+  // mesmo com a geometria já pré-calculada — é o volume de objetos/DOM,
+  // não conta geométrica (Turf) nenhuma.
+  const statusEl = document.getElementById('carga-status');
+  const hideOU=document.getElementById('q-hide-ou')?.checked||false;
+  visibleQuadras=QUADRAS.filter(q=>{
+    if(qfilters.bairro!=='Todos'&&q.bairro!==qfilters.bairro) return false;
+    if(hideOU&&q.ou) return false;
+    return getSubGroups(q).some(s => subPassaFiltrosNumericos(q, s));
+  });
+  const tot=visibleQuadras.reduce((s,q)=>s+q.area,0);
+  document.getElementById('q-count-label').innerHTML=`<strong>${visibleQuadras.length.toLocaleString('pt-BR')}</strong> quadras`;
+  document.getElementById('q-area-label').textContent=`${(tot/10000).toFixed(1)} ha total`;
+  document.getElementById('map-info').textContent=`🗺 ${visibleQuadras.length.toLocaleString('pt-BR')} composições no mapa`;
+  renderQuadraList();
+  await renderQuadraMarkersEmLotes(800, pct => { if (statusEl) statusEl.textContent = `Desenhando o mapa… ${pct}%`; });
+
   document.getElementById('carga-overlay').style.display = 'none';
-  applyQFilters();
   mostrarToast('Todos os bairros foram carregados!');
 }
 
@@ -6579,10 +6599,7 @@ function geomToLatLngs(geom){
   return [];
 }
 
-function renderQuadraMarkers() {
-  _recalcularCachesVinculo();
-  layers.quadras.clearLayers(); quadraPolygons={};
-  visibleQuadras.forEach(q=>{
+function _renderUmaQuadra(q){
     const subs=getSubGroups(q);
     if (!subs.length) return;
     const geom=GEOM_MAP[q.bairro+'::'+q.id];
@@ -6650,7 +6667,27 @@ function renderQuadraMarkers() {
       layer.addTo(layers.quadras);
       quadraPolygons[q.bairro+'::'+sub.subId]=layer;
     });
-  });
+}
+function renderQuadraMarkers() {
+  _recalcularCachesVinculo();
+  layers.quadras.clearLayers(); quadraPolygons={};
+  visibleQuadras.forEach(q => _renderUmaQuadra(q));
+}
+// Mesmo trabalho de renderQuadraMarkers(), só que em lotes com pausas entre
+// eles — usado só depois do carregamento em massa de bairros, quando
+// visibleQuadras pode chegar a dezenas de milhares de itens de uma vez.
+// Criar todos os polígonos Leaflet numa passada síncrona só nesse volume é
+// pesado o bastante pra travar a aba sozinho, mesmo com a geometria já
+// pré-calculada (GEOM_MAP) — sem Turf.js envolvido, é só o volume de
+// objetos/DOM do Leaflet mesmo.
+async function renderQuadraMarkersEmLotes(tamanhoLote=800, rotuloProgresso){
+  _recalcularCachesVinculo();
+  layers.quadras.clearLayers(); quadraPolygons={};
+  for (let i=0; i<visibleQuadras.length; i+=tamanhoLote) {
+    visibleQuadras.slice(i, i+tamanhoLote).forEach(q => _renderUmaQuadra(q));
+    if (rotuloProgresso) rotuloProgresso(Math.min(100, Math.round(100*(i+tamanhoLote)/visibleQuadras.length)));
+    await new Promise(r => setTimeout(r, 0));
+  }
 }
 
 // ── Vilas potenciais: composições que hoje são clusters desconectados mas
