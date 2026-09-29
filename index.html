@@ -1376,12 +1376,33 @@ function fatorIpca(dataIso){
 // porque é grande demais pra embutir (cidade inteira, não só o que os
 // corretores acompanharam ao longo do tempo).
 let ITBI_VIZINHANCA = {};
+let itbiVizinhancaCarregado = false, itbiVizinhancaCarregando = false;
 async function carregarItbiVizinhanca(){
+  itbiVizinhancaCarregando = true;
   try {
     ITBI_VIZINHANCA = await fetchComCache('pacotes_extra/itbi_vizinhanca.json') || {};
   } catch(e) {
     console.warn('Não foi possível carregar a base de vizinhança do ITBI:', e);
   }
+  itbiVizinhancaCarregando = false;
+  itbiVizinhancaCarregado = true;
+}
+// Dispara o carregamento se ainda não começou (seguro chamar várias vezes —
+// não veio mais no Promise.all do boot: são ~24MB, e só é usado quando o
+// corretor abre a seção "Valor de referência do ITBI" de UMA composição
+// específica, nunca pra todas de uma vez (isso é o avaliarTerreno, outro
+// sistema, mais leve). Bloquear a abertura do app inteiro esperando esse
+// arquivo era desperdício — agora carrega em segundo plano assim que o
+// boot começa, e a ficha só espera por ele se o corretor for rápido
+// demais e abrir uma composição antes dele terminar.
+function garantirItbiVizinhancaCarregada(){
+  if (itbiVizinhancaCarregado) return Promise.resolve(true);
+  if (!itbiVizinhancaCarregando) carregarItbiVizinhanca();
+  return new Promise(resolve => {
+    const espera = setInterval(() => {
+      if (itbiVizinhancaCarregado) { clearInterval(espera); resolve(true); }
+    }, 200);
+  });
 }
 let _VIZ_AMOSTRAS_CACHE = null;
 function todasAmostrasItbi(){
@@ -1518,6 +1539,13 @@ let _vizAtual = null;
 function formatarDataBR(iso){ return iso.split('-').reverse().join('/'); }
 
 function htmlVizinhancaItbi(q, stats){
+  if (!itbiVizinhancaCarregado) {
+    return `
+    <div class="dp-sec">
+      <div class="dp-st">Valor de referência do ITBI (vizinhança)</div>
+      <div style="font-size:11px;color:#90a4ae">Carregando base de comparáveis…</div>
+    </div>`;
+  }
   const qidBase = q.id.split('-')[0];
   const centro = centroDaComposicao(qidBase, stats) || {lat: q.lat, lon: q.lon};
   const r = analisarVizinhancaItbi(centro.lat, centro.lon, q.zona);
@@ -7620,6 +7648,11 @@ function selectQuadra(qid, subId, manterView, bairroHint){
   garantirItbiHistoricoCarregado(qidBaseParaItbi).then(carregouAgora => {
     if (carregouAgora && selectedQid===qid) selectQuadra(qid, subId, true, bairroHint);
   });
+  if (!itbiVizinhancaCarregado) {
+    garantirItbiVizinhancaCarregada().then(() => {
+      if (selectedQid===qid) selectQuadra(qid, subId, true, bairroHint);
+    });
+  }
   const subs = getSubGroups(q);
   if (subs.length===0) { closeDetail(); return; } // todos os lotes restritos, nada a mostrar
   const activeSub = subs.find(s=>s.subId===subId) || subs[0];
@@ -8817,7 +8850,9 @@ function iniciarApp(){
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
   const numDistritosIniciais = DISTRITOS_DISPONIVEIS.filter(d => DISTRITOS_INICIAIS.includes(d.distrito)).length;
-  _resetProgressoCarga(numDistritosIniciais + 14); // 14 = as outras tarefas do Promise.all abaixo
+  _resetProgressoCarga(numDistritosIniciais + 13); // 13 = as outras tarefas do Promise.all abaixo
+
+  carregarItbiVizinhanca(); // segundo plano — não bloqueia a abertura do app (ver comentário na função)
 
   Promise.all([
     _comProgressoCarga(iniciarSincronizacaoLotes(), 'Sincronizando restrições…'),
@@ -8833,7 +8868,6 @@ function iniciarApp(){
     _comProgressoCarga(carregarProprietarios(), 'Carregando nomes de proprietários…'),
     _comProgressoCarga(carregarTombamento(), 'Carregando bens tombados…'),
     _comProgressoCarga(carregarAreasProtegidas(), 'Carregando áreas envoltórias…'),
-    _comProgressoCarga(carregarItbiVizinhanca(), 'Carregando base de vizinhança do ITBI…'),
     carregarDistritosIniciais(),
   ]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
