@@ -1373,11 +1373,23 @@ function fatorIpca(dataIso){
 
 // Lista completa (todas as amostras do universo de ITBI) com R$/m² de
 // terreno válido, calculada uma vez — usada como base de busca
+// Dataset city-wide, separado do ITBI_RAW (que continua intocado — alimenta
+// só a ficha/popup de lote via transacoesItbi). Carregado externamente
+// porque é grande demais pra embutir (cidade inteira, não só o que os
+// corretores acompanharam ao longo do tempo).
+let ITBI_VIZINHANCA = {};
+async function carregarItbiVizinhanca(){
+  try {
+    ITBI_VIZINHANCA = await fetchComCache('pacotes_extra/itbi_vizinhanca.json') || {};
+  } catch(e) {
+    console.warn('Não foi possível carregar a base de vizinhança do ITBI:', e);
+  }
+}
 let _VIZ_AMOSTRAS_CACHE = null;
 function todasAmostrasItbi(){
   if (_VIZ_AMOSTRAS_CACHE) return _VIZ_AMOSTRAS_CACHE;
   const lista = [];
-  Object.entries(ITBI_RAW).forEach(([sql, regs]) => {
+  Object.entries(ITBI_VIZINHANCA).forEach(([sql, regs]) => {
     regs.forEach(r => {
       if (r.n !== 'mercado' || !r.vt || r.lat==null || r.lon==null) return;
       lista.push({sql, ...r});
@@ -1385,6 +1397,39 @@ function todasAmostrasItbi(){
   });
   _VIZ_AMOSTRAS_CACHE = lista;
   return lista;
+}
+// Índice espacial (grade) — sem isso, cada composição varreria as ~66 mil
+// amostras da cidade inteira, em até 8 raios crescentes, pra cada uma das
+// milhares de composições calculadas no login. Cada célula tem ~1,1km de
+// lado; pra buscar num raio de R km, só olha as células que cruzam esse
+// raio, não a base inteira.
+const ITBI_GRID_CELULA = 0.01;
+let _ITBI_GRID = null;
+function _construirGradeItbi(){
+  const todas = todasAmostrasItbi();
+  const grade = new Map();
+  for (const a of todas) {
+    const chave = Math.floor(a.lat/ITBI_GRID_CELULA)+','+Math.floor(a.lon/ITBI_GRID_CELULA);
+    if (!grade.has(chave)) grade.set(chave, []);
+    grade.get(chave).push(a);
+  }
+  return grade;
+}
+function _candidatosNoRaio(lat, lon, raioKm){
+  if (!_ITBI_GRID) _ITBI_GRID = _construirGradeItbi();
+  const dLat = raioKm / 111.32;
+  const cosLat = Math.cos(lat*Math.PI/180) || 1e-6;
+  const dLon = raioKm / (111.32*cosLat);
+  const cyMin = Math.floor((lat-dLat)/ITBI_GRID_CELULA), cyMax = Math.floor((lat+dLat)/ITBI_GRID_CELULA);
+  const cxMin = Math.floor((lon-dLon)/ITBI_GRID_CELULA), cxMax = Math.floor((lon+dLon)/ITBI_GRID_CELULA);
+  const candidatos = [];
+  for (let cy=cyMin; cy<=cyMax; cy++){
+    for (let cx=cxMin; cx<=cxMax; cx++){
+      const bucket = _ITBI_GRID.get(cy+','+cx);
+      if (bucket) candidatos.push(...bucket);
+    }
+  }
+  return candidatos;
 }
 
 // Exclusão de outlier pelo método do intervalo interquartil (IQR) —
@@ -1423,7 +1468,7 @@ function analisarVizinhancaItbi(lat, lon, zona){
   function buscarComRaioCrescente(exigirMesmaZona){
     let melhor = {amostras: [], raio: RAIOS[0]};
     for (const raio of RAIOS) {
-      const achadas = todas
+      const achadas = _candidatosNoRaio(lat, lon, raio)
         .map(a => ({...a, dist: distanciaKm(lat, lon, a.lat, a.lon)}))
         .filter(a => a.dist <= raio && (!exigirMesmaZona || a.zona === zona));
       const nRecentes = achadas.filter(a => new Date(a.d) >= limiteAnos).length;
@@ -5646,16 +5691,15 @@ function lotePopupHTML(sql, groupId) {
   const areaTerreno = LOTES_AREA[sql];
   const iptu = dadosIptu(sql);
   let transacoesHtml;
-  if (itbiPontosFalhou) {
-    transacoesHtml = `<span style="color:#90a4ae">Não foi possível carregar as transações de ITBI</span>`;
-  } else if (!itbiPontosLoaded) {
+  const bucketItbi = _bucketDoSetor(sql.split('.')[0]);
+  if (!_itbiHistoricoBucketsCarregados.has(bucketItbi)) {
     transacoesHtml = `<span style="color:#90a4ae">Carregando transações de ITBI…</span>`;
   } else {
-    const transacoes = transacoesItbiDoLote(sql, 3);
+    const transacoes = transacoesItbi(sql).slice(0,3);
     if (transacoes.length) {
-      transacoesHtml = transacoes.map(t => `${t.d} — R$ ${Math.round(t.v).toLocaleString('pt-BR')}`).join('<br>');
+      transacoesHtml = transacoes.map(t => `${t.d.split('-').reverse().join('/')} — R$ ${Math.round(t.v).toLocaleString('pt-BR')}`).join('<br>');
     } else {
-      transacoesHtml = `<span style="color:#90a4ae">Não houve transações para este imóvel desde ${ITBI_DATA_CORTE_FIXA}</span>`;
+      transacoesHtml = `<span style="color:#90a4ae">Não houve transações para este imóvel desde 01/01/2006</span>`;
     }
   }
   const dadosLoteHtml = `
@@ -8195,7 +8239,6 @@ function abrirPopupLote(sql, groupId, latlng){
   popup.on('remove', () => {
     if (_popupLoteAberto && _popupLoteAberto.popup === popup) _popupLoteAberto = null;
   });
-  garantirItbiPontosCarregados().then(() => atualizarPopupLoteAberto());
   garantirItbiHistoricoCarregado(sql.split('.').slice(0,2).join('.')).then(() => atualizarPopupLoteAberto());
 }
 function atualizarPopupLoteAberto(){
@@ -8649,7 +8692,7 @@ function iniciarApp(){
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
   const numDistritosIniciais = DISTRITOS_DISPONIVEIS.filter(d => DISTRITOS_INICIAIS.includes(d.distrito)).length;
-  _resetProgressoCarga(numDistritosIniciais + 13); // 13 = as outras tarefas do Promise.all abaixo
+  _resetProgressoCarga(numDistritosIniciais + 14); // 14 = as outras tarefas do Promise.all abaixo
 
   Promise.all([
     _comProgressoCarga(iniciarSincronizacaoLotes(), 'Sincronizando restrições…'),
@@ -8665,6 +8708,7 @@ function iniciarApp(){
     _comProgressoCarga(carregarProprietarios(), 'Carregando nomes de proprietários…'),
     _comProgressoCarga(carregarTombamento(), 'Carregando bens tombados…'),
     _comProgressoCarga(carregarAreasProtegidas(), 'Carregando áreas envoltórias…'),
+    _comProgressoCarga(carregarItbiVizinhanca(), 'Carregando base de vizinhança do ITBI…'),
     carregarDistritosIniciais(),
   ]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
