@@ -2556,19 +2556,22 @@ async function fetchComCache(url, timeoutMs=20000){
   }
 }
 
-async function carregarDistritosIniciais(){
+async function carregarDistritosIniciais(callbackFracao){
   const alvos = DISTRITOS_DISPONIVEIS.filter(d => DISTRITOS_INICIAIS.includes(d.distrito));
+  const totalMB = alvos.reduce((s,d)=>s+Math.max(d.tamanhoMB,0.05), 0);
+  let mbFeitos = 0;
   const resultados = await Promise.all(alvos.map(async info => {
     try {
       const pacote = await fetchComCache(info.arquivo);
       mesclarPacoteDistrito(pacote);
       regioesCarregadas.add(info.distrito);
-      _incrementarProgressoCarga(`Carregando ${info.bairro}…`);
       return true;
     } catch(e) {
       console.warn('Falha ao pré-carregar distrito inicial:', info.distrito, e);
-      _incrementarProgressoCarga(`Carregando ${info.bairro}…`);
       return false;
+    } finally {
+      mbFeitos += Math.max(info.tamanhoMB, 0.05);
+      if (callbackFracao) callbackFracao(mbFeitos/totalMB, `Carregando ${info.bairro}…`);
     }
   }));
   // Só depois que TODOS os distritos iniciais entraram — as duas metades
@@ -2628,6 +2631,27 @@ async function carregarDistrito(nomeDistrito, opcoes={}){
 // Carrega todos os bairros que ainda faltam de uma vez, com a mesma barra
 // de progresso do login — pedido do Matheus pra não precisar clicar
 // distrito por distrito no mapa quando quiser ver a cidade inteira.
+// Recalcula visibleQuadras com os filtros atuais e redesenha o mapa em
+// lotes (ver renderQuadraMarkersEmLotes) — usado tanto no boot normal
+// quanto no carregamento em massa de bairros. progressoDe/progressoAte
+// são a fatia (0-1) da barra de progresso geral reservada pra essa etapa;
+// atualizarProgresso é _definirProgressoCarga (ou equivalente).
+async function _filtrarERenderizarEmLotes(progressoDe, progressoAte, atualizarProgresso){
+  const hideOU=document.getElementById('q-hide-ou')?.checked||false;
+  visibleQuadras=QUADRAS.filter(q=>{
+    if(qfilters.bairro!=='Todos'&&q.bairro!==qfilters.bairro) return false;
+    if(hideOU&&q.ou) return false;
+    return getSubGroups(q).some(s => subPassaFiltrosNumericos(q, s));
+  });
+  const tot=visibleQuadras.reduce((s,q)=>s+q.area,0);
+  document.getElementById('q-count-label').innerHTML=`<strong>${visibleQuadras.length.toLocaleString('pt-BR')}</strong> quadras`;
+  document.getElementById('q-area-label').textContent=`${(tot/10000).toFixed(1)} ha total`;
+  document.getElementById('map-info').textContent=`🗺 ${visibleQuadras.length.toLocaleString('pt-BR')} composições no mapa`;
+  renderQuadraList();
+  await renderQuadraMarkersEmLotes(800, pct => {
+    if (atualizarProgresso) atualizarProgresso(progressoDe + (pct/100)*(progressoAte-progressoDe), `Desenhando o mapa… ${pct}%`);
+  });
+}
 async function carregarTodosOsBairros(){
   const faltando = DISTRITOS_DISPONIVEIS.filter(d => !regioesCarregadas.has(d.distrito));
   if (!faltando.length) { mostrarToast('Todos os bairros já estão carregados.'); return; }
@@ -2667,20 +2691,7 @@ async function carregarTodosOsBairros(){
   // numa passada síncrona só é pesado o bastante pra travar a aba sozinho,
   // mesmo com a geometria já pré-calculada — é o volume de objetos/DOM,
   // não conta geométrica (Turf) nenhuma.
-  const hideOU=document.getElementById('q-hide-ou')?.checked||false;
-  visibleQuadras=QUADRAS.filter(q=>{
-    if(qfilters.bairro!=='Todos'&&q.bairro!==qfilters.bairro) return false;
-    if(hideOU&&q.ou) return false;
-    return getSubGroups(q).some(s => subPassaFiltrosNumericos(q, s));
-  });
-  const tot=visibleQuadras.reduce((s,q)=>s+q.area,0);
-  document.getElementById('q-count-label').innerHTML=`<strong>${visibleQuadras.length.toLocaleString('pt-BR')}</strong> quadras`;
-  document.getElementById('q-area-label').textContent=`${(tot/10000).toFixed(1)} ha total`;
-  document.getElementById('map-info').textContent=`🗺 ${visibleQuadras.length.toLocaleString('pt-BR')} composições no mapa`;
-  renderQuadraList();
-  await renderQuadraMarkersEmLotes(800, pct => {
-    _definirProgressoCarga((1-PESO_DESENHO) + (pct/100)*PESO_DESENHO, `Desenhando o mapa… ${pct}%`);
-  });
+  await _filtrarERenderizarEmLotes(1-PESO_DESENHO, 1, _definirProgressoCarga);
 
   _definirProgressoCarga(1, 'Pronto!');
   document.getElementById('carga-overlay').style.display = 'none';
@@ -9000,8 +9011,25 @@ function iniciarApp(){
   currentTab='quadras';
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
-  const numDistritosIniciais = DISTRITOS_DISPONIVEIS.filter(d => DISTRITOS_INICIAIS.includes(d.distrito)).length;
-  _resetProgressoCarga(numDistritosIniciais + 11); // 11 = as outras tarefas do Promise.all abaixo
+  _resetProgressoCarga(1); // trabalha em fração (0 a 1) do processo INTEIRO, até a página ficar pronta de verdade
+
+  // Três fatias da barra, cada uma com peso proporcional ao que realmente
+  // costuma consumir mais tempo: os distritos iniciais (~45MB, maior peso
+  // de rede), as outras ~11 tarefas (sincronizações do Firebase + dados
+  // auxiliares, geralmente rápidas) e o desenho final do mapa (que antes
+  // não aparecia na barra NENHUM POUCO — ficava "parado" em 100% enquanto
+  // ainda desenhava ~6 mil polígonos de uma vez só, e era exatamente esse
+  // trecho invisível que travava a aba com o aviso de página sem resposta).
+  const PESO_DISTRITOS = 0.55, PESO_OUTRAS = 0.15, PESO_DESENHO = 0.30;
+  const TOTAL_OUTRAS_TAREFAS = 11;
+  let outrasFeitas = 0;
+  function progressoOutraTarefa(rotulo){
+    outrasFeitas++;
+    _definirProgressoCarga(PESO_DISTRITOS + (outrasFeitas/TOTAL_OUTRAS_TAREFAS)*PESO_OUTRAS, rotulo);
+  }
+  function comProgressoPonderado(promessa, rotulo){
+    return promessa.then(r => { progressoOutraTarefa(rotulo); return r; }, e => { progressoOutraTarefa(rotulo); throw e; });
+  }
 
   // Segundo plano — não bloqueiam a abertura do app. itbi_comparaveis.json
   // (9MB) alimenta o fator de avaliação no score; itbi_vizinhanca.json
@@ -9015,18 +9043,21 @@ function iniciarApp(){
   carregarProprietarios();
 
   Promise.all([
-    _comProgressoCarga(_comTimeout(iniciarSincronizacaoLotes(), 25000, 'lotes_status'), 'Sincronizando restrições…'),
-    _comProgressoCarga(_comTimeout(iniciarSincronizacaoProspeccao(), 25000, 'prospeccao_status'), 'Sincronizando prospecções…'),
-    _comProgressoCarga(_comTimeout(iniciarSincronizacaoDescarte(), 25000, 'descarte_status'), 'Sincronizando descartes…'),
-    _comProgressoCarga(_comTimeout(iniciarSincronizacaoFuturo(), 25000, 'futuro_status'), 'Sincronizando futuros lançamentos…'),
-    _comProgressoCarga(_comTimeout(iniciarSincronizacaoProprietarios(), 25000, 'proprietarios_cache'), 'Sincronizando proprietários…'),
-    _comProgressoCarga(_comTimeout(iniciarSincronizacaoEmpreendimentoIgnorado(), 25000, 'empreendimento_ignorado'), 'Sincronizando empreendimentos ignorados…'),
-    _comProgressoCarga(_comTimeout(iniciarSincronizacaoVinculos(), 25000, 'vinculos'), 'Sincronizando vínculos…'),
-    _comProgressoCarga(_comTimeout(iniciarSincronizacaoValidacaoAle(), 25000, 'validacao_ale_status'), 'Sincronizando validações…'),
-    _comProgressoCarga(_comTimeout(iniciarSincronizacaoBaixaPrioridade(), 25000, 'baixa_prioridade_status'), 'Sincronizando baixa prioridade…'),
-    _comProgressoCarga(_comTimeout(carregarTombamento(), 25000, 'tombamento_*.json'), 'Carregando bens tombados…'),
-    _comProgressoCarga(_comTimeout(carregarAreasProtegidas(), 25000, 'areas_protegidas.json'), 'Carregando áreas envoltórias…'),
-    _comTimeout(carregarDistritosIniciais(), 40000, 'distritos iniciais'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoLotes(), 25000, 'lotes_status'), 'Sincronizando restrições…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoProspeccao(), 25000, 'prospeccao_status'), 'Sincronizando prospecções…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoDescarte(), 25000, 'descarte_status'), 'Sincronizando descartes…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoFuturo(), 25000, 'futuro_status'), 'Sincronizando futuros lançamentos…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoProprietarios(), 25000, 'proprietarios_cache'), 'Sincronizando proprietários…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoEmpreendimentoIgnorado(), 25000, 'empreendimento_ignorado'), 'Sincronizando empreendimentos ignorados…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoVinculos(), 25000, 'vinculos'), 'Sincronizando vínculos…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoValidacaoAle(), 25000, 'validacao_ale_status'), 'Sincronizando validações…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoBaixaPrioridade(), 25000, 'baixa_prioridade_status'), 'Sincronizando baixa prioridade…'),
+    comProgressoPonderado(_comTimeout(carregarTombamento(), 25000, 'tombamento_*.json'), 'Carregando bens tombados…'),
+    comProgressoPonderado(_comTimeout(carregarAreasProtegidas(), 25000, 'areas_protegidas.json'), 'Carregando áreas envoltórias…'),
+    _comTimeout(
+      carregarDistritosIniciais(frac => _definirProgressoCarga(frac*PESO_DISTRITOS, `Carregando bairros iniciais… ${Math.round(frac*100)}%`)),
+      40000, 'distritos iniciais'
+    ),
   ]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
     await repararProspeccoesAposUnificacao(); // corrige prospecções gravadas antes da unificação de quadras
@@ -9036,10 +9067,18 @@ function iniciarApp(){
     loadPerimetrosLayer();
     atualizarContadorRegioes();
     applyFilters();
-    atualizarFiltroCategorias(); // já chama applyQFilters() internamente — aplica de fato os checkboxes marcados por padrão
+    // Aplica os checkboxes marcados por padrão (mesmo cálculo de sempre,
+    // só sem chamar applyQFilters() — quem desenha agora é a versão em
+    // lotes logo abaixo, não a síncrona de uma vez só).
+    CATEGORIAS_VISIVEIS = new Set(
+      ['disponivel','prospeccao','baixa_prioridade','validar_ale','sobreposta','descarte','futuro','dificil','obras','naoedificavel','tombado']
+        .filter(cat => document.getElementById('q-show-'+cat)?.checked)
+    );
+    await _filtrarERenderizarEmLotes(PESO_DISTRITOS+PESO_OUTRAS, 1, _definirProgressoCarga);
     carregarCorretores();
     atualizarDashboardProspeccaoSeAberto();
     atualizarDashboardValidacaoAleSeAberto();
+    _definirProgressoCarga(1, 'Pronto!');
     document.getElementById('carga-overlay').style.display = 'none';
     _bootConcluido = true;
   }).catch(() => {
