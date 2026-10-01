@@ -560,6 +560,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     </button>
     <button class="btn btn-green" onclick="exportVisible()">⬇ Exportar</button>
     <button class="btn" onclick="exportarParaConsultaProprietarios()" title="Gera um .txt com o código de todos os lotes das composições que passam pelos filtros atuais, pronto pra usar com o script de consulta de proprietários">👤 Exportar p/ consulta de donos</button>
+    <button class="btn" onclick="exportarParaAtualizacaoProprietarios()" title="Gera um .txt só com os lotes cujo nome do proprietário pode estar desatualizado (transação de ITBI registrada perto ou depois da última consulta) — pra reconsultar só quem precisa, não a base toda">🔄 Exportar p/ atualização de proprietários</button>
   </div>
 </div>
 
@@ -1120,10 +1121,69 @@ function dvDoSql(sql){
 // colou o nome) e PROPRIETARIOS (carga em massa do script
 // consultar_proprietarios.py). O manual tem prioridade por ser mais
 // recente/verificado; o em massa preenche o resto.
-function nomeProprietario(sql){
+// Data retroativa fixa pra tudo que já estava na base de consulta em
+// massa ANTES dessa funcionalidade existir — pedido do Matheus: cadastrar
+// tudo que já tínhamos como "set/26", já que não tínhamos data própria
+// registrada por lote nessa fonte até agora. Só vale pra entradas no
+// formato antigo (string pura); se o script de consulta em massa for
+// atualizado pra gravar {nome, data} por lote, essa data real é que
+// prevalece — a retroativa é só o fallback pro que já existia.
+const DATA_RETROATIVA_PROPRIETARIOS = '2026-09-01';
+const MESES_ABREV_PT = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
+function formatarMesAno(dataISO){
+  const d = new Date(dataISO);
+  return `${MESES_ABREV_PT[d.getMonth()]}/${String(d.getFullYear()).slice(-2)}`;
+}
+// dias entre duas datas (fim - início); positivo quando fim é depois de início
+function diasEntre(dataInicio, dataFim){
+  return Math.round((new Date(dataFim) - new Date(dataInicio)) / 86400000);
+}
+// Info completa (nome + data da consulta) de um proprietário, unificando
+// as duas fontes: cadastro manual (já tinha data própria de sempre) e
+// consulta em massa (formato antigo = só string, sem data própria — cai
+// na retroativa; formato novo = {nome, data}, usa a data real).
+function infoProprietario(sql){
   const manual = PROPRIETARIOS_CACHE[sql];
-  if (manual && manual.nome) return manual.nome;
-  return PROPRIETARIOS[sql] || null;
+  if (manual && manual.nome) return {nome: manual.nome, data: manual.data};
+  const emMassa = PROPRIETARIOS[sql];
+  if (!emMassa) return null;
+  if (typeof emMassa === 'string') return {nome: emMassa, data: DATA_RETROATIVA_PROPRIETARIOS};
+  return {nome: emMassa.nome, data: emMassa.data || DATA_RETROATIVA_PROPRIETARIOS};
+}
+function nomeProprietario(sql){
+  const info = infoProprietario(sql);
+  return info ? info.nome : null;
+}
+// Limiar (em dias) pedido pelo Matheus: se a consulta do nome do
+// proprietário aconteceu MENOS de 180 dias depois da transação de ITBI
+// mais recente registrada pro lote (incluindo o caso da consulta ter
+// acontecido ANTES da transação, ou seja, número negativo), o nome pode
+// não refletir o comprador mais recente — o cadastro municipal costuma
+// demorar a atualizar depois de uma venda.
+const LIMIAR_DIAS_PROPRIETARIO_DESATUALIZADO = 180;
+function checarProprietarioDesatualizado(sql){
+  const info = infoProprietario(sql);
+  if (!info) return null;
+  const transacoes = transacoesItbi(sql);
+  if (!transacoes.length) return null;
+  const dataTransacao = transacoes[0].d; // já vem ordenado, mais recente primeiro
+  const diffConsultaTransacao = diasEntre(dataTransacao, info.data); // consulta − transação
+  if (diffConsultaTransacao >= LIMIAR_DIAS_PROPRIETARIO_DESATUALIZADO) return null;
+  const diasDesdeTransacao = diasEntre(dataTransacao, new Date().toISOString());
+  return { diasDesdeTransacao, dataTransacao };
+}
+// HTML compacto "NOME (mmm/aa)" ou "NOME (mmm/aa) *" quando desatualizado
+// — usado em todo lugar que mostra o nome do proprietário.
+function htmlNomeComData(sql){
+  const info = infoProprietario(sql);
+  if (!info) return null;
+  const desatualizado = checarProprietarioDesatualizado(sql);
+  return `${escapeHtmlHistorico(info.nome)} <span style="color:#888;font-weight:400">(${formatarMesAno(info.data)})</span>${desatualizado ? ' <strong style="color:#c62828">*</strong>' : ''}`;
+}
+function htmlNotaProprietarioDesatualizado(sql){
+  const desatualizado = checarProprietarioDesatualizado(sql);
+  if (!desatualizado) return '';
+  return `<div style="color:#c62828;font-size:10px;margin-top:2px;line-height:1.4">* Nome do proprietário possivelmente desatualizado. Transação imobiliária registrada há ${desatualizado.diasDesdeTransacao.toLocaleString('pt-BR')} dias.</div>`;
 }
 // Facilidade de negociação: idealmente conta PROPRIETÁRIOS distintos, não
 // lotes — negociar 10 lotes com o mesmo dono é bem mais fácil que 10
@@ -1198,8 +1258,9 @@ function htmlProprietario(sql){
     return `<div class="prop-box">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
         <div>
-          <div class="prop-nome">👤 ${escapeHtmlHistorico(manual.nome)}</div>
+          <div class="prop-nome">👤 ${htmlNomeComData(sql)}</div>
           <div class="prop-meta">consultado em ${quando} por ${escapeHtmlHistorico(manual.por)}</div>
+          ${htmlNotaProprietarioDesatualizado(sql)}
         </div>
         <button class="prop-btn" onclick="consultarProprietario('${sql}')">Atualizar</button>
       </div>
@@ -1210,7 +1271,7 @@ function htmlProprietario(sql){
     </div>`;
   }
   // Sem cadastro manual — mas pode ter vindo da consulta em massa (script
-  // consultar_proprietarios.py, carregada em PROPRIETARIOS). Sem data/quem
+  // consultar_proprietarios.py, carregada em PROPRIETARIOS). Sem quem
   // consultou nesse caso (o script não registra isso pessoa a pessoa), mas
   // o nome já é exibido — é exatamente essa fonte que ficava faltando
   // aparecer aqui, mesmo já valendo na tabela "Lotes contíguos" da ficha.
@@ -1219,8 +1280,9 @@ function htmlProprietario(sql){
     return `<div class="prop-box">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
         <div>
-          <div class="prop-nome">👤 ${escapeHtmlHistorico(nomeEmMassa)}</div>
-          <div class="prop-meta">via consulta em massa (sem data/quem individual)</div>
+          <div class="prop-nome">👤 ${htmlNomeComData(sql)}</div>
+          <div class="prop-meta">via consulta em massa (sem responsável individual)</div>
+          ${htmlNotaProprietarioDesatualizado(sql)}
         </div>
         <button class="prop-btn" onclick="consultarProprietario('${sql}')">Atualizar</button>
       </div>
@@ -5869,9 +5931,10 @@ function lotePopupHTML(sql, groupId) {
     </div>` : ''; })()}
     <div style="background:#f7f7f7;border-radius:5px;padding:6px 8px;margin-bottom:6px;font-size:11px;line-height:1.5">
       <div>👤 ${nomeProp
-        ? `<strong>${escapeHtmlHistorico(nomeProp)}</strong>`
+        ? `<strong>${htmlNomeComData(sql)}</strong>`
         : `<span style="color:#90a4ae">não consultado</span> <button class="prop-btn" style="font-size:9.5px;padding:1px 6px" onclick="consultarProprietario('${sql}')">🔍 Consultar</button>`
       }</div>
+      ${htmlNotaProprietarioDesatualizado(sql)}
       ${!nomeProp ? `<div class="prop-form" id="prop-form-${safeId}" style="display:none;margin:4px 0">
         <input id="prop-input-${safeId}" placeholder="Cole o nome que apareceu no formulário">
         <button onclick="salvarProprietario('${sql}')">Salvar</button>
@@ -7899,7 +7962,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
           return `<tr>
             <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2;font-family:monospace;white-space:nowrap">${sqlComDigito(sql)}</td>
             <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2">${nome
-              ? escapeHtmlHistorico(nome)
+              ? htmlNomeComData(sql) + htmlNotaProprietarioDesatualizado(sql)
               : `<button class="prop-btn" style="font-size:10px;padding:2px 8px" onclick="consultarProprietario('${sql}')">🔍 Consultar</button>
                  <div class="prop-form" id="prop-form-${safe}" style="display:none;margin-top:4px">
                    <input id="prop-input-${safe}" placeholder="Cole o nome que apareceu no formulário">
@@ -8133,6 +8196,56 @@ function exportarParaConsultaProprietarios(){
     (semDigito ? ` (${semDigito.toLocaleString('pt-BR')} sem dígito conhecido, ignorados)` : '') +
     `.${avisoVolume}`,
     9000
+  );
+}
+// Mesma ideia do botão acima, mas em vez de exportar TODOS os lotes das
+// composições visíveis, exporta só os que já têm proprietário consultado
+// MAS com uma transação de ITBI registrada perto ou depois da data dessa
+// consulta — pedido do Matheus pra reconsultar só quem provavelmente
+// mudou de dono, a cada ~3 meses, sem precisar varrer a base toda de
+// novo. Olha TODOS os lotes das quadras já carregadas (não só as que
+// passam pelos filtros do mapa no momento — desatualização não tem nada
+// a ver com o filtro visual).
+function exportarParaAtualizacaoProprietarios(){
+  const sqls = new Set();
+  let semDigito = 0;
+  QUADRAS.forEach(q => {
+    const qidBase = q.id.split('-')[0];
+    q.lotes.forEach(l => {
+      const sql = `${qidBase}.${l}`;
+      if (!checarProprietarioDesatualizado(sql)) return;
+      const digito = DIGITO_SQL[sql];
+      if (digito) sqls.add(`${sql}-${digito}`);
+      else semDigito++;
+    });
+  });
+
+  if (!sqls.size) {
+    mostrarToast('Nenhum lote com proprietário possivelmente desatualizado entre os bairros já carregados.', 7000);
+    return;
+  }
+
+  const linhas = Array.from(sqls).sort();
+  const cabecalho =
+`# Gerado pelo Buscador de terrenos em ${new Date().toLocaleString('pt-BR')}
+# ${linhas.length} lote(s) com proprietário possivelmente desatualizado (transação de ITBI registrada perto ou depois da última consulta)
+# Use com: python consultar_proprietarios.py lotes_para_atualizar_proprietarios.txt
+`;
+  const conteudo = cabecalho + linhas.join('\n') + '\n';
+  const a = document.createElement('a');
+  a.href = 'data:text/plain;charset=utf-8,' + encodeURIComponent(conteudo);
+  a.download = 'lotes_para_atualizar_proprietarios.txt';
+  a.click();
+
+  const distritosFaltando = DISTRITOS_DISPONIVEIS.length - regioesCarregadas.size;
+  const avisoParcial = distritosFaltando > 0
+    ? ` ⚠️ ${distritosFaltando} bairro(s) ainda não carregado(s) ficaram de fora dessa checagem — use "🗺️ Exibir todos os bairros" primeiro pra uma varredura completa da cidade.`
+    : '';
+  mostrarToast(
+    `${linhas.length.toLocaleString('pt-BR')} lote(s) possivelmente desatualizado(s) exportado(s)` +
+    (semDigito ? ` (${semDigito.toLocaleString('pt-BR')} sem dígito conhecido, ignorados)` : '') +
+    `.${avisoParcial}`,
+    10000
   );
 }
 
@@ -8841,12 +8954,26 @@ function irParaComposicaoDashboard(qid, subId, bairro){
 // do app, junto com as sincronizações do Firebase, em vez de esperar
 // algum checkbox. Sem isso carregado, toda quadra pontuaria errado nesse
 // fator até o usuário mexer em algum filtro.
+let _bootConcluido = false;
+let itbiComparaveisCarregado = false;
 async function carregarItbiComparaveis(){
   try {
     const dados = await fetchComCache('pacotes_extra/itbi_comparaveis.json');
     pushSeguro(ITBI_COMPARAVEIS, dados);
   } catch(e) {
     console.warn('Falha ao carregar comparáveis de ITBI — avaliação preliminar e o fator de margem no score ficam indisponíveis até recarregar a página.', e);
+  }
+  itbiComparaveisCarregado = true;
+  // Enquanto os dados não tinham chegado, qualquer composição já
+  // renderizada calculou (e cacheou) o fator de avaliação do score como 0
+  // (fatorAvaliacaoScore trata falta de dado como neutro) — limpa esse
+  // cache agora que os dados de verdade chegaram e redesenha, senão o
+  // score de todo mundo ficaria errado pelo resto da sessão. Só faz isso
+  // se o boot já tiver terminado (senão quem ainda vai rodar depois já
+  // vê os dados certos de primeira, sem precisar desse empurrão).
+  if (_bootConcluido) {
+    _avalScoreCache.clear();
+    applyQFilters();
   }
 }
 // Arquivo OPCIONAL — só existe depois que a primeira rodada do script
@@ -8860,6 +8987,10 @@ async function carregarProprietarios(){
   } catch(e) {
     console.info('proprietarios.json ainda não existe em pacotes_extra/ — nomes de proprietário ficam indisponíveis até a primeira rodada do script.');
   }
+  // Não afeta cor/composição de nada no mapa (só exibição) — se tiver uma
+  // ficha aberta no momento em que os dados chegarem, só precisa atualizar
+  // ela, não o mapa inteiro.
+  if (_bootConcluido && selectedQid) selectQuadra(selectedQid, selectedSubId, true);
 }
 
 function iniciarApp(){
@@ -8870,9 +9001,18 @@ function iniciarApp(){
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
   const numDistritosIniciais = DISTRITOS_DISPONIVEIS.filter(d => DISTRITOS_INICIAIS.includes(d.distrito)).length;
-  _resetProgressoCarga(numDistritosIniciais + 13); // 13 = as outras tarefas do Promise.all abaixo
+  _resetProgressoCarga(numDistritosIniciais + 11); // 11 = as outras tarefas do Promise.all abaixo
 
-  carregarItbiVizinhanca(); // segundo plano — não bloqueia a abertura do app (ver comentário na função)
+  // Segundo plano — não bloqueiam a abertura do app. itbi_comparaveis.json
+  // (9MB) alimenta o fator de avaliação no score; itbi_vizinhanca.json
+  // (24MB) só é usado quando uma ficha específica é aberta; proprietarios
+  // é só exibição, não afeta cor/composição de nada. Nenhum dos três é
+  // crítico pro primeiro desenho do mapa — diferente de tombamento/área
+  // protegida, que continuam bloqueantes porque entram na decisão de
+  // QUAIS lotes compõem uma composição, não só em como ela é exibida.
+  carregarItbiComparaveis();
+  carregarItbiVizinhanca();
+  carregarProprietarios();
 
   Promise.all([
     _comProgressoCarga(_comTimeout(iniciarSincronizacaoLotes(), 25000, 'lotes_status'), 'Sincronizando restrições…'),
@@ -8884,8 +9024,6 @@ function iniciarApp(){
     _comProgressoCarga(_comTimeout(iniciarSincronizacaoVinculos(), 25000, 'vinculos'), 'Sincronizando vínculos…'),
     _comProgressoCarga(_comTimeout(iniciarSincronizacaoValidacaoAle(), 25000, 'validacao_ale_status'), 'Sincronizando validações…'),
     _comProgressoCarga(_comTimeout(iniciarSincronizacaoBaixaPrioridade(), 25000, 'baixa_prioridade_status'), 'Sincronizando baixa prioridade…'),
-    _comProgressoCarga(_comTimeout(carregarItbiComparaveis(), 25000, 'itbi_comparaveis.json'), 'Carregando comparáveis de ITBI…'),
-    _comProgressoCarga(_comTimeout(carregarProprietarios(), 25000, 'proprietarios.json'), 'Carregando nomes de proprietários…'),
     _comProgressoCarga(_comTimeout(carregarTombamento(), 25000, 'tombamento_*.json'), 'Carregando bens tombados…'),
     _comProgressoCarga(_comTimeout(carregarAreasProtegidas(), 25000, 'areas_protegidas.json'), 'Carregando áreas envoltórias…'),
     _comTimeout(carregarDistritosIniciais(), 40000, 'distritos iniciais'),
@@ -8903,12 +9041,14 @@ function iniciarApp(){
     atualizarDashboardProspeccaoSeAberto();
     atualizarDashboardValidacaoAleSeAberto();
     document.getElementById('carga-overlay').style.display = 'none';
+    _bootConcluido = true;
   }).catch(() => {
     loadPerimetrosLayer();
     atualizarContadorRegioes();
     applyFilters();
     atualizarFiltroCategorias();
     document.getElementById('carga-overlay').style.display = 'none';
+    _bootConcluido = true;
   });
 }
 
