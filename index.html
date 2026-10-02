@@ -530,6 +530,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
       <div id="carga-barra" style="background:#00B0B9;height:100%;width:2%;border-radius:20px;transition:width .35s ease"></div>
     </div>
     <div id="carga-percentual" style="font-size:22px;font-weight:700;color:#00B0B9">0%</div>
+    <div id="carga-estimativa" style="font-size:11.5px;color:#aaa;margin-top:6px;min-height:14px"></div>
   </div>
 </div>
 
@@ -2534,7 +2535,7 @@ async function _cacheSet(chave, valor){
 // IMEDIATAMENTE (sem esperar a rede) e atualiza o cache em segundo plano
 // pra próxima vez. Sem cópia salva (primeira visita, ou cache limpo),
 // busca normal da rede e já guarda pra próxima.
-async function fetchComCache(url, timeoutMs=20000){
+async function fetchComCache(url, timeoutMs=60000){
   const cacheado = await _cacheGet(url);
   if (cacheado) {
     fetch(url).then(r => r.ok ? r.json() : null).then(dados => { if (dados) _cacheSet(url, dados); }).catch(()=>{});
@@ -3595,8 +3596,10 @@ function sairDaConta(){
 // Firebase, ou um distrito inteiro) — o percentual é sempre
 // unidadesConcluidas/unidadesTotais, nunca um número inventado/estimado.
 let _progressoCarga = { total: 1, feito: 0 };
+let _inicioProgressoCarga = null;
 function _resetProgressoCarga(totalUnidades){
   _progressoCarga = { total: Math.max(1, totalUnidades), feito: 0 };
+  _inicioProgressoCarga = Date.now();
   _renderProgressoCarga();
 }
 function _incrementarProgressoCarga(rotulo){
@@ -3608,11 +3611,36 @@ function _incrementarProgressoCarga(rotulo){
   _renderProgressoCarga();
 }
 function _renderProgressoCarga(){
-  const pct = Math.min(100, Math.round((_progressoCarga.feito / _progressoCarga.total) * 100));
+  const fracao = _progressoCarga.feito / _progressoCarga.total;
+  const pct = Math.min(100, Math.round(fracao * 100));
   const barra = document.getElementById('carga-barra');
   const texto = document.getElementById('carga-percentual');
   if (barra) barra.style.width = pct + '%';
   if (texto) texto.textContent = pct + '%';
+
+  // Estimativa simples: extrapola o tempo restante a partir da velocidade
+  // MÉDIA desde o início (tempo decorrido ÷ fração concluída). Não tenta
+  // ser sofisticado (sem suavização entre amostras) — é só uma ideia
+  // aproximada de "quanto falta", não uma promessa exata; por isso só
+  // mostra depois de uns segundos/fração mínima, pra não exibir um
+  // número maluco com base em meio segundo de dado.
+  const elEstimativa = document.getElementById('carga-estimativa');
+  if (elEstimativa && _inicioProgressoCarga) {
+    const decorridoMs = Date.now() - _inicioProgressoCarga;
+    if (pct >= 100) {
+      elEstimativa.textContent = '';
+    } else if (decorridoMs < 3000 || fracao < 0.03) {
+      elEstimativa.textContent = 'Calculando tempo estimado…';
+    } else {
+      const totalEstimadoMs = decorridoMs / fracao;
+      const restanteMs = Math.max(0, totalEstimadoMs - decorridoMs);
+      const restanteSeg = Math.round(restanteMs / 1000);
+      const texto = restanteSeg < 60
+        ? `~${restanteSeg}s restantes`
+        : `~${Math.round(restanteSeg/60)} min restantes`;
+      elEstimativa.textContent = texto;
+    }
+  }
 }
 // Variante fracionária — pra processos com pesos desiguais entre etapas
 // (ex: distritos de 0,01MB a 15MB cada), onde tratar cada etapa como "1
@@ -9043,20 +9071,20 @@ function iniciarApp(){
   carregarProprietarios();
 
   Promise.all([
-    comProgressoPonderado(_comTimeout(iniciarSincronizacaoLotes(), 25000, 'lotes_status'), 'Sincronizando restrições…'),
-    comProgressoPonderado(_comTimeout(iniciarSincronizacaoProspeccao(), 25000, 'prospeccao_status'), 'Sincronizando prospecções…'),
-    comProgressoPonderado(_comTimeout(iniciarSincronizacaoDescarte(), 25000, 'descarte_status'), 'Sincronizando descartes…'),
-    comProgressoPonderado(_comTimeout(iniciarSincronizacaoFuturo(), 25000, 'futuro_status'), 'Sincronizando futuros lançamentos…'),
-    comProgressoPonderado(_comTimeout(iniciarSincronizacaoProprietarios(), 25000, 'proprietarios_cache'), 'Sincronizando proprietários…'),
-    comProgressoPonderado(_comTimeout(iniciarSincronizacaoEmpreendimentoIgnorado(), 25000, 'empreendimento_ignorado'), 'Sincronizando empreendimentos ignorados…'),
-    comProgressoPonderado(_comTimeout(iniciarSincronizacaoVinculos(), 25000, 'vinculos'), 'Sincronizando vínculos…'),
-    comProgressoPonderado(_comTimeout(iniciarSincronizacaoValidacaoAle(), 25000, 'validacao_ale_status'), 'Sincronizando validações…'),
-    comProgressoPonderado(_comTimeout(iniciarSincronizacaoBaixaPrioridade(), 25000, 'baixa_prioridade_status'), 'Sincronizando baixa prioridade…'),
-    comProgressoPonderado(_comTimeout(carregarTombamento(), 25000, 'tombamento_*.json'), 'Carregando bens tombados…'),
-    comProgressoPonderado(_comTimeout(carregarAreasProtegidas(), 25000, 'areas_protegidas.json'), 'Carregando áreas envoltórias…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoLotes(), 75000, 'lotes_status'), 'Sincronizando restrições…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoProspeccao(), 75000, 'prospeccao_status'), 'Sincronizando prospecções…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoDescarte(), 75000, 'descarte_status'), 'Sincronizando descartes…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoFuturo(), 75000, 'futuro_status'), 'Sincronizando futuros lançamentos…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoProprietarios(), 75000, 'proprietarios_cache'), 'Sincronizando proprietários…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoEmpreendimentoIgnorado(), 75000, 'empreendimento_ignorado'), 'Sincronizando empreendimentos ignorados…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoVinculos(), 75000, 'vinculos'), 'Sincronizando vínculos…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoValidacaoAle(), 75000, 'validacao_ale_status'), 'Sincronizando validações…'),
+    comProgressoPonderado(_comTimeout(iniciarSincronizacaoBaixaPrioridade(), 75000, 'baixa_prioridade_status'), 'Sincronizando baixa prioridade…'),
+    comProgressoPonderado(_comTimeout(carregarTombamento(), 75000, 'tombamento_*.json'), 'Carregando bens tombados…'),
+    comProgressoPonderado(_comTimeout(carregarAreasProtegidas(), 75000, 'areas_protegidas.json'), 'Carregando áreas envoltórias…'),
     _comTimeout(
       carregarDistritosIniciais(frac => _definirProgressoCarga(frac*PESO_DISTRITOS, `Carregando bairros iniciais… ${Math.round(frac*100)}%`)),
-      40000, 'distritos iniciais'
+      120000, 'distritos iniciais'
     ),
   ]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
