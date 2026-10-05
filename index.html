@@ -2506,6 +2506,29 @@ const DISTRITOS_INICIAIS = [
 // mais recentes, se algo tiver mudado nesse meio tempo. Falhas aqui
 // (navegador sem IndexedDB, modo anônimo restrito, etc.) nunca travam o
 // app — nesse caso ele simplesmente busca da rede como sempre fez.
+// ── Diagnóstico da abertura ─────────────────────────────────────────────
+// Linha do tempo + "tarefas longas" (momentos em que a tela ficou presa
+// por mais de 50ms). Serve pra descobrir ONDE o tempo de abertura vai de
+// verdade em vez de adivinhar. Imprime sozinho no console ao fim da
+// abertura e de novo 40s depois (pra pegar respostas atrasadas); pode ser
+// chamado à mão a qualquer momento digitando perfAbertura() no console.
+const _perfEventos = [];
+const _perfTarefasLongas = [];
+function _perfMarcar(nome){ _perfEventos.push({t: performance.now(), nome}); }
+try {
+  new PerformanceObserver(lista => lista.getEntries().forEach(e => _perfTarefasLongas.push({ini: e.startTime, dur: e.duration})))
+    .observe({type: 'longtask', buffered: true});
+} catch(e) { /* navegador sem suporte — só fica sem a parte de tarefas longas */ }
+function perfAbertura(){
+  const seg = ms => (ms/1000).toFixed(1) + 's';
+  const linhas = _perfEventos.slice().sort((a,b)=>a.t-b.t).map(e => '  ' + seg(e.t).padStart(7) + '  ' + e.nome);
+  const soma = _perfTarefasLongas.reduce((x,t)=>x+t.dur, 0);
+  const maiores = _perfTarefasLongas.slice().sort((a,b)=>b.dur-a.dur).slice(0,8)
+    .map(t => seg(t.dur) + ' em ' + seg(t.ini)).join('  ·  ');
+  console.log('[Abertura] diagnóstico — tempos desde o início da página\n' + linhas.join('\n') +
+    '\n  Tela presa (tarefas >50ms): ' + _perfTarefasLongas.length + ' vezes, somando ' + seg(soma) +
+    '\n  Maiores: ' + (maiores || '—'));
+}
 const CACHE_DB_VERSAO = 'yuny_cache_v1'; // trocar o nome invalida todo o cache antigo de uma vez
 const CACHE_STORE = 'pacotes';
 function _abrirCacheDB(){
@@ -2541,8 +2564,22 @@ async function _cacheSet(chave, valor){
 // IMEDIATAMENTE (sem esperar a rede) e atualiza o cache em segundo plano
 // pra próxima vez. Sem cópia salva (primeira visita, ou cache limpo),
 // busca normal da rede e já guarda pra próxima.
-async function fetchComCache(url, timeoutMs=60000){
-  const cacheado = await _cacheGet(url);
+async function fetchComCache(url, timeoutMs=60000, tetoLeituraCacheMs=null){
+  // tetoLeituraCacheMs (opcional): o IndexedDB atende uma fila — gravações
+  // grandes (ex: atualizar em segundo plano os 45MB de pacotes de bairro)
+  // podem atrasar uma leitura pequena por MUITO tempo. Nos arquivos
+  // pequenos que bloqueiam a abertura, desiste do cache local depois desse
+  // tempo e busca direto na rede, em vez de esperar a fila.
+  const ehPacote = url.includes('pacotes_distrito');
+  const nomeCurto = url.split('/').pop();
+  let cacheado;
+  if (tetoLeituraCacheMs) {
+    cacheado = await Promise.race([_cacheGet(url), new Promise(r => setTimeout(() => r(undefined), tetoLeituraCacheMs))]);
+    if (cacheado === undefined) _perfMarcar('cache local não respondeu em ' + tetoLeituraCacheMs + 'ms (' + nomeCurto + ') → indo pra rede');
+  } else {
+    cacheado = await _cacheGet(url);
+  }
+  if (!ehPacote) _perfMarcar('cache local: ' + nomeCurto + (cacheado ? ' (achou)' : ' (vazio)'));
   if (cacheado) {
     fetch(url).then(r => r.ok ? r.json() : null).then(dados => { if (dados) _cacheSet(url, dados); }).catch(()=>{});
     return cacheado;
@@ -2556,6 +2593,7 @@ async function fetchComCache(url, timeoutMs=60000){
     const resp = await fetch(url, {signal: controller.signal});
     if (!resp.ok) throw new Error('HTTP '+resp.status);
     const dados = await resp.json();
+    if (!ehPacote) _perfMarcar('rede: ' + nomeCurto + ' chegou');
     _cacheSet(url, dados);
     return dados;
   } finally {
@@ -2567,10 +2605,18 @@ async function carregarDistritosIniciais(callbackFracao){
   const alvos = DISTRITOS_DISPONIVEIS.filter(d => DISTRITOS_INICIAIS.includes(d.distrito));
   const totalMB = alvos.reduce((s,d)=>s+Math.max(d.tamanhoMB,0.05), 0);
   let mbFeitos = 0;
+  let maiorEspera = {ms:0, nome:''}, somaMerge = 0, maiorMerge = {ms:0, nome:''};
   const resultados = await Promise.all(alvos.map(async info => {
     try {
+      const tEsp = performance.now();
       const pacote = await fetchComCache(info.arquivo);
+      const espera = performance.now() - tEsp;
+      if (espera > maiorEspera.ms) maiorEspera = {ms: espera, nome: info.bairro};
+      const tMerge = performance.now();
       mesclarPacoteDistrito(pacote);
+      const dur = performance.now() - tMerge;
+      somaMerge += dur;
+      if (dur > maiorMerge.ms) maiorMerge = {ms: dur, nome: info.bairro};
       regioesCarregadas.add(info.distrito);
       return true;
     } catch(e) {
@@ -2584,7 +2630,10 @@ async function carregarDistritosIniciais(callbackFracao){
   // Só depois que TODOS os distritos iniciais entraram — as duas metades
   // de uma quadra de divisa podem vir de distritos diferentes, então
   // unificar antes disso não juntaria nada.
+  _perfMarcar('bairros iniciais: todos recebidos (maior espera por um pacote: ' + (maiorEspera.ms/1000).toFixed(1) + 's, ' + maiorEspera.nome + ')');
+  const tUni = performance.now();
   unificarQuadrasDuplicadas();
+  _perfMarcar('bairros iniciais: mesclagem somou ' + (somaMerge/1000).toFixed(1) + 's (maior ' + (maiorMerge.ms/1000).toFixed(1) + 's, ' + maiorMerge.nome + ') + unificação ' + ((performance.now()-tUni)/1000).toFixed(1) + 's');
   const falhas = resultados.filter(r => !r).length;
   if (falhas) mostrarToast(`${falhas} região(ões) inicial(is) não carregaram — clique no perímetro pra tentar de novo.`);
 }
@@ -3084,8 +3133,8 @@ let TOMBAMENTO_AREAS = [];
 async function carregarTombamento(){
   try {
     const [lotes, areas] = await Promise.all([
-      fetchComCache('pacotes_extra/tombamento_lotes.json'),
-      fetchComCache('pacotes_extra/tombamento_areas.json'),
+      fetchComCache('pacotes_extra/tombamento_lotes.json', 60000, 4000),
+      fetchComCache('pacotes_extra/tombamento_areas.json', 60000, 4000),
     ]);
     TOMBAMENTO_LOTES = lotes || {};
     TOMBAMENTO_AREAS = areas || [];
@@ -3780,7 +3829,7 @@ function _definirProgressoCarga(fracao, rotulo){
 function _comTimeout(promessa, ms, nome){
   return Promise.race([
     promessa,
-    new Promise(resolve => setTimeout(() => { console.warn(`Tempo esgotado esperando: ${nome} (${ms/1000}s) — seguindo sem essa etapa por ora.`); resolve(); }, ms)),
+    new Promise(resolve => setTimeout(() => { _perfMarcar('TEMPO ESGOTADO: ' + nome); console.warn(`Tempo esgotado esperando: ${nome} (${ms/1000}s) — seguindo sem essa etapa por ora.`); resolve(); }, ms)),
   ]);
 }
 function _comProgressoCarga(promessa, rotulo){
@@ -4980,42 +5029,64 @@ function _fbAplicarPendentes(){
 }
 // Substitui _fbDb.ref(caminho).on('value', cb, errCb) nos canais que
 // afetam a cor das composições. Os callbacks só usam snapshot.val().
+//
+// A escuta do servidor começa IMEDIATAMENTE; a leitura do estado salvo
+// roda em paralelo e só vale se chegar ANTES da primeira resposta do
+// servidor (e dentro de FB_SEED_LEITURA_MAX_MS). Assim o estado salvo
+// nunca pode atrasar a abertura — no pior caso o app se comporta como se
+// não existisse. (Uma versão anterior esperava a leitura local antes de
+// escutar o servidor: se o IndexedDB demorasse, atrasava tudo junto.)
+const FB_SEED_LEITURA_MAX_MS = 2500;
 function _fbOnValueSWR(caminho, cb, errCb){
-  (async () => {
-    let seed = null;
-    try {
-      const reg = await _cacheGet(FB_SEED_PREFIXO + caminho);
-      if (reg && typeof reg.ts === 'number' && (Date.now() - reg.ts) < FB_SEED_IDADE_MAX_MS) seed = reg;
-    } catch(e) { seed = null; }
+  const norm = v => (v === undefined ? null : v);
+  let seedAplicado = false, jsonSeed = null, primeiroAoVivo = true, aoVivoRecebido = false;
 
-    const norm = v => (v === undefined ? null : v);
-    let jsonSeed = null;
-    if (seed) {
-      try {
-        jsonSeed = JSON.stringify(norm(seed.dados));
-        cb({ val: () => norm(seed.dados) });   // mesmo caminho do 1º snapshot de verdade: aplica os dados e libera a abertura
-        // O callback de restrições marca "Sincronizado" — mentira enquanto só temos o salvo.
-        if (caminho === 'lotes_status') atualizarIndicadorSync('conectando');
-      } catch(e) { console.warn('Estado salvo de', caminho, 'não pôde ser aplicado:', e); seed = null; }
-    }
-
-    let primeiroAoVivo = true;
-    _fbDb.ref(caminho).on('value', snap => {
-      const valor = norm(snap.val());
-      _cacheSet(FB_SEED_PREFIXO + caminho, { ts: Date.now(), dados: valor });
-      if (seed && primeiroAoVivo) {
-        primeiroAoVivo = false;
-        if (caminho === 'lotes_status') atualizarIndicadorSync('ok');
-        if (JSON.stringify(valor) === jsonSeed) return;           // nada mudou desde a última visita
-        _fbAgendarAplicacao(caminho, () => cb(snap));            // mudou: aplica agrupado
-        return;
-      }
+  _fbDb.ref(caminho).on('value', snap => {
+    const valor = norm(snap.val());
+    aoVivoRecebido = true;
+    _cacheSet(FB_SEED_PREFIXO + caminho, { ts: Date.now(), dados: valor });
+    if (primeiroAoVivo) _perfMarcar('servidor respondeu: ' + caminho + (seedAplicado ? ' (' + (JSON.stringify(valor) === jsonSeed ? 'igual ao salvo' : 'DIFERENTE do salvo') + ')' : ''));
+    if (primeiroAoVivo && seedAplicado) {
       primeiroAoVivo = false;
-      // Se já há uma atualização adiada pra esse canal, a mais nova entra no lugar dela
-      // (senão a antiga, aplicada depois, sobrescreveria a nova).
-      if (_fbSeedPendentes.has(caminho)) { _fbAgendarAplicacao(caminho, () => cb(snap)); return; }
-      cb(snap);
-    }, errCb);
+      if (caminho === 'lotes_status') atualizarIndicadorSync('ok');
+      if (JSON.stringify(valor) === jsonSeed) return;           // nada mudou desde a última visita
+      _fbAgendarAplicacao(caminho, () => cb(snap));            // mudou: aplica agrupado
+      return;
+    }
+    if (primeiroAoVivo && _bootConcluido) {
+      // Resposta que chegou DEPOIS de a abertura já ter seguido sem ela
+      // (estouro de tempo): o callback, na 1ª vez, só guarda os dados e não
+      // redesenha nada — o mapa ficaria com as cores velhas. Aplica pelo
+      // caminho agrupado, que termina com um redesenho.
+      primeiroAoVivo = false;
+      _fbAgendarAplicacao(caminho, () => cb(snap));
+      return;
+    }
+    primeiroAoVivo = false;
+    // Se já há uma atualização adiada pra esse canal, a mais nova entra no lugar dela
+    // (senão a antiga, aplicada depois, sobrescreveria a nova).
+    if (_fbSeedPendentes.has(caminho)) { _fbAgendarAplicacao(caminho, () => cb(snap)); return; }
+    cb(snap);
+  }, errCb);
+
+  (async () => {
+    let reg = null;
+    try {
+      reg = await Promise.race([
+        _cacheGet(FB_SEED_PREFIXO + caminho),
+        new Promise(r => setTimeout(() => r(null), FB_SEED_LEITURA_MAX_MS)),
+      ]);
+    } catch(e) { reg = null; }
+    if (aoVivoRecebido) return;                                  // o servidor foi mais rápido
+    if (!reg || typeof reg.ts !== 'number' || (Date.now() - reg.ts) >= FB_SEED_IDADE_MAX_MS) return;
+    try {
+      jsonSeed = JSON.stringify(norm(reg.dados));
+      seedAplicado = true;
+      cb({ val: () => norm(reg.dados) });   // mesmo caminho do 1º snapshot de verdade: aplica os dados e libera a abertura
+      _perfMarcar('estado salvo aplicado: ' + caminho);
+      // O callback de restrições marca "Sincronizado" — mentira enquanto só temos o salvo.
+      if (caminho === 'lotes_status') atualizarIndicadorSync('conectando');
+    } catch(e) { console.warn('Estado salvo de', caminho, 'não pôde ser aplicado:', e); seedAplicado = false; }
   })();
 }
 // Ao sair da conta, apaga o estado salvo (não deixa dados da equipe no navegador).
@@ -6512,7 +6583,7 @@ const COR_DISPONIVEL_CA_BAIXO = '#81c784';
 let AREAS_PROTEGIDAS = [];
 async function carregarAreasProtegidas(){
   try {
-    AREAS_PROTEGIDAS = await fetchComCache('pacotes_extra/areas_protegidas.json') || [];
+    AREAS_PROTEGIDAS = await fetchComCache('pacotes_extra/areas_protegidas.json', 60000, 4000) || [];
   } catch(e) {
     console.warn('Não foi possível carregar as áreas envoltórias/bairro ambiental:', e);
   }
@@ -9272,6 +9343,7 @@ function iniciarApp(){
   currentTab='quadras';
   map.invalidateSize();   // o mapa nasceu escondido atrás do login, precisa remedir
 
+  _perfMarcar('app iniciado (login concluído)');
   _resetProgressoCarga(1); // trabalha em fração (0 a 1) do processo INTEIRO, até a página ficar pronta de verdade
 
   // Três fatias da barra, cada uma com peso proporcional ao que realmente
@@ -9326,6 +9398,7 @@ function iniciarApp(){
       ).then(r => { _cargaPendentes.delete(rotuloBairros); return r; });
     })(),
   ]).then(async () => {
+    _perfMarcar('todas as etapas de carga terminaram (ou estouraram o tempo)');
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
     await repararProspeccoesAposUnificacao(); // corrige prospecções gravadas antes da unificação de quadras
     // Perímetros só das regiões que NÃO vieram pré-carregadas — desenhados
@@ -9342,12 +9415,16 @@ function iniciarApp(){
         .filter(cat => document.getElementById('q-show-'+cat)?.checked)
     );
     await _filtrarERenderizarEmLotes(PESO_DISTRITOS+PESO_OUTRAS, 1, _definirProgressoCarga);
+    _perfMarcar('mapa desenhado');
     carregarCorretores();
     atualizarDashboardProspeccaoSeAberto();
     atualizarDashboardValidacaoAleSeAberto();
     _definirProgressoCarga(1, 'Pronto!');
     document.getElementById('carga-overlay').style.display = 'none';
     _bootConcluido = true;
+    _perfMarcar('abertura concluída — mapa liberado');
+    perfAbertura();
+    setTimeout(perfAbertura, 40000);   // de novo 40s depois, pra incluir respostas que chegaram atrasadas
   }).catch(() => {
     loadPerimetrosLayer();
     atualizarContadorRegioes();
