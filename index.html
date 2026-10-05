@@ -750,8 +750,8 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
          usa uma biblioteca à parte (MapLibre GL JS) só pra essa opção. -->
     <div id="fonte-mapa-ctrl" style="display:none;position:absolute;top:46px;right:10px;z-index:1000;background:#fff;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.3);padding:5px 8px;font-size:11.5px">
       <select id="fonte-mapa-select" onchange="trocarFonteMapa(this.value)" style="border:none;background:transparent;font-size:11.5px;color:#333;cursor:pointer">
-        <option value="osm">🗺️ OpenStreetMap (padrão)</option>
-        <option value="openfreemap">✨ OpenFreeMap (limpo)</option>
+        <option value="osm">🗺️ OpenStreetMap</option>
+        <option value="openfreemap" selected>✨ OpenFreeMap (limpo, padrão)</option>
       </select>
     </div>
 
@@ -1108,7 +1108,13 @@ function iniciarSincronizacaoProprietarios(){
       const novo = {};
       Object.entries(dados).forEach(([k,v]) => { novo[fbKeyToSql(k)] = v; });
       PROPRIETARIOS_CACHE = novo;
-      if (primeira) { primeira = false; resolve(); }
+      if (primeira) {
+        primeira = false; resolve();
+        // Roda em segundo plano (não trava mais a abertura — nome de
+        // proprietário só aparece em ficha/popup, nunca na cor de nada):
+        // se já tem uma ficha aberta quando os nomes chegarem, atualiza.
+        if (_bootConcluido && selectedQid) selectQuadra(selectedQid, selectedSubId, true);
+      }
       else if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
     }, err => { avisarErroSincronizacao('proprietarios', err); primeira=false; resolve(); });
   });
@@ -2821,9 +2827,23 @@ const TILES_SAT  = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_I
 const ATTR_MAPA = '© OpenStreetMap contributors';
 const ATTR_SAT  = '© Esri, Maxar, Earthstar Geographics';
 let TILES_COM_CORS = true;
-let basemapMapa = L.tileLayer(TILES_MAPA,{attribution:ATTR_MAPA,maxZoom:19,crossOrigin:true});
+// Mapa base padrão de abertura: OpenFreeMap (Positron, "limpo"), a pedido
+// do Matheus. Se a biblioteca vetorial (MapLibre) não tiver carregado —
+// rede lenta ou bloqueio de CDN — abre no OpenStreetMap de sempre em vez
+// de ficar sem mapa. Se a biblioteca carregou mas o ESTILO/tiles não vierem
+// (bloqueio de tiles.openfreemap.org, por ex.), _vigiarOpenFreeMap volta
+// sozinho pro OpenStreetMap depois de alguns segundos.
+const OPENFREEMAP_PADRAO = typeof L.maplibreGL === 'function';
+let basemapMapa = OPENFREEMAP_PADRAO
+  ? criarCamadaOpenFreeMap()
+  : L.tileLayer(TILES_MAPA,{attribution:ATTR_MAPA,maxZoom:19,crossOrigin:true});
 let basemapSatelite = L.tileLayer(TILES_SAT,{attribution:ATTR_SAT,maxZoom:19,crossOrigin:true});
 basemapMapa.addTo(map);
+{ const selFonte = document.getElementById('fonte-mapa-select'); if (selFonte) selFonte.value = OPENFREEMAP_PADRAO ? 'openfreemap' : 'osm'; }
+// Camada vetorial (MapLibre) é reconhecida pelo método getMaplibreMap — as
+// camadas de imagem (L.tileLayer) não têm.
+function _basemapEhVetorial(camada){ return !!camada && typeof camada.getMaplibreMap === 'function'; }
+if (_basemapEhVetorial(basemapMapa)) _vigiarOpenFreeMap(basemapMapa);
 
 // Se o servidor de tiles não mandar CORS, as imagens simplesmente não carregam.
 // Aqui contamos os erros dos primeiros segundos e, se forem muitos, recriamos
@@ -2836,13 +2856,17 @@ function _onTileError(){
   TILES_COM_CORS = false;
   console.warn('Tiles sem CORS — recriando basemaps sem crossOrigin. A captura automática do mapa ficará indisponível (use print manual).');
   const eraSat = map.hasLayer(basemapSatelite);
-  if (map.hasLayer(basemapMapa)) map.removeLayer(basemapMapa);
+  // O mapa base vetorial (OpenFreeMap) não passa por CORS de tile nem
+  // dispara tileerror — não faz sentido trocá-lo por OSM só porque o
+  // satélite reclamou. Só recria o mapa de imagem se ELE for o raster.
+  const mapaEraVetorial = _basemapEhVetorial(basemapMapa);
+  if (!mapaEraVetorial && map.hasLayer(basemapMapa)) map.removeLayer(basemapMapa);
   if (map.hasLayer(basemapSatelite)) map.removeLayer(basemapSatelite);
-  basemapMapa = L.tileLayer(TILES_MAPA,{attribution:ATTR_MAPA,maxZoom:19});
+  if (!mapaEraVetorial) basemapMapa = L.tileLayer(TILES_MAPA,{attribution:ATTR_MAPA,maxZoom:19});
   basemapSatelite = L.tileLayer(TILES_SAT,{attribution:ATTR_SAT,maxZoom:19});
-  (eraSat ? basemapSatelite : basemapMapa).addTo(map);
+  if (eraSat) basemapSatelite.addTo(map); else if (!mapaEraVetorial) basemapMapa.addTo(map);
 }
-basemapMapa.on('tileerror', _onTileError);
+if (!_basemapEhVetorial(basemapMapa)) basemapMapa.on('tileerror', _onTileError);
 basemapSatelite.on('tileerror', _onTileError);
 
 // ── Fontes alternativas de satélite (não mais histórico — resolução e
@@ -2909,7 +2933,48 @@ function trocarFonteMapa(fonte) {
     basemapMapa = L.tileLayer(TILES_MAPA, {attribution: ATTR_MAPA, maxZoom: 19, crossOrigin: TILES_COM_CORS});
     basemapMapa.on('tileerror', _onTileError);
   }
-  if (estavaVisivel) basemapMapa.addTo(map);
+  if (estavaVisivel) {
+    basemapMapa.addTo(map);
+    if (_basemapEhVetorial(basemapMapa)) _vigiarOpenFreeMap(basemapMapa);
+  }
+}
+// O OpenFreeMap busca o estilo e os tiles em tiles.openfreemap.org — numa
+// rede corporativa esse domínio pode estar bloqueado, e aí o mapa base
+// ficaria em branco sem nenhum aviso. Se a camada não terminar de carregar
+// (ou o estilo falhar de cara), volta sozinho pro OpenStreetMap e avisa.
+function _vigiarOpenFreeMap(camada){
+  let carregou = false, falhou = false;
+  const voltarParaOSM = (motivo) => {
+    if (falhou || carregou || basemapMapa !== camada) return;
+    falhou = true;
+    console.warn('OpenFreeMap não carregou — voltando pro OpenStreetMap:', motivo);
+    const sel = document.getElementById('fonte-mapa-select'); if (sel) sel.value = 'osm';
+    trocarFonteMapa('osm');
+    mostrarToast('O mapa "limpo" (OpenFreeMap) não carregou — usando o OpenStreetMap padrão.', 7000);
+  };
+  // a instância do MapLibre só existe depois que a camada entra no mapa
+  setTimeout(() => {
+    const gl = camada.getMaplibreMap && camada.getMaplibreMap();
+    if (!gl) { voltarParaOSM('sem instância do MapLibre'); return; }
+    if (gl.loaded && gl.loaded()) carregou = true;
+    else gl.once('load', () => { carregou = true; });
+    let erroAgendado = false;
+    gl.on('error', e => {
+      // erro ANTES do primeiro carregamento e sem estilo aplicado = o
+      // estilo nem chegou. Dá uma folga curta (pode ser um tropeço isolado).
+      if (carregou || erroAgendado || gl.getStyle()) return;
+      erroAgendado = true;
+      setTimeout(() => voltarParaOSM(e && e.error && e.error.message), 6000);
+    });
+    // Só começa a contar os 20s DEPOIS que o app terminou de abrir: nos
+    // primeiros segundos a thread principal está ocupada com o boot e o
+    // evento "carregou" do mapa atrasa à toa — daria alarme falso.
+    const esperaBoot = setInterval(() => {
+      if (!_bootConcluido) return;
+      clearInterval(esperaBoot);
+      setTimeout(() => voltarParaOSM('tempo esgotado (20s)'), 20000);
+    }, 1000);
+  }, 0);
 }
 function setBasemap(qual){
   _sincronizarBotoesCaptura(qual);
@@ -3442,6 +3507,20 @@ try {
   _fbApp = (firebase.apps && firebase.apps.find(a=>a.name===APP_NAME))
     || firebase.initializeApp(firebaseConfig, APP_NAME);
   _fbDb = firebase.database(_fbApp);
+  // O Firebase tenta WebSocket primeiro ("assume falha até provar o
+  // contrário") e só cai pro modo alternativo (long-polling) depois de
+  // esperar ~30s se a conexão ficar pendurada. Em rede corporativa com
+  // proxy que segura/inspeciona WebSocket, isso fazia TODAS as
+  // sincronizações demorarem o mesmo tanto na abertura (visto no console:
+  // as 9 estourando juntas). Forçar long-polling desde o início pula essa
+  // espera — um pouco menos eficiente que WebSocket em rede boa, mas
+  // conecta de primeira em qualquer rede. Pra comparar/voltar ao
+  // comportamento antigo: abra o app com ?ws=1 no final do endereço.
+  try {
+    if (!/[?&]ws=1\b/.test(location.search) && _fbDb.INTERNAL && typeof _fbDb.INTERNAL.forceLongPolling === 'function') {
+      _fbDb.INTERNAL.forceLongPolling();
+    }
+  } catch(e) { console.warn('Não foi possível forçar long-polling no Firebase:', e); }
   _fbAuth = firebase.auth(_fbApp);
   _fbAtivo = true;
 } catch(e) { console.warn('Firebase não pôde ser iniciado — funcionando só localmente, sem sincronização com a equipe:', e); }
@@ -3588,7 +3667,7 @@ function entrarComMicrosoft(){
 
 function sairDaConta(){
   if (!_fbAtivo) return;
-  _fbAuth.signOut().then(()=>{ location.reload(); });
+  _fbSeedLimpar().then(() => _fbAuth.signOut()).then(()=>{ location.reload(); });
 }
 
 // ── Controle de progresso da caixa de carregamento ────────────────────
@@ -3597,9 +3676,21 @@ function sairDaConta(){
 // unidadesConcluidas/unidadesTotais, nunca um número inventado/estimado.
 let _progressoCarga = { total: 1, feito: 0 };
 let _inicioProgressoCarga = null;
+// Etapas ainda em andamento (rótulos) — usado só pra dizer na tela, quando
+// a espera passa de uns segundos, ONDE exatamente ela está parada.
+const _cargaPendentes = new Set();
+let _ultimoAvancoCarga = 0, _ultimaFracaoCarga = 0, _timerEstimativaCarga = null;
 function _resetProgressoCarga(totalUnidades){
   _progressoCarga = { total: Math.max(1, totalUnidades), feito: 0 };
   _inicioProgressoCarga = Date.now();
+  _ultimoAvancoCarga = _inicioProgressoCarga;
+  _ultimaFracaoCarga = 0;
+  _cargaPendentes.clear();
+  // Relógio próprio: a versão anterior só recalculava a estimativa quando o
+  // progresso mudava — numa espera longa (ex: esperando o servidor) ninguém
+  // atualizava a tela e ela ficava congelada num "~3s restantes" velho.
+  if (_timerEstimativaCarga) clearInterval(_timerEstimativaCarga);
+  _timerEstimativaCarga = setInterval(_atualizarEstimativaCarga, 1000);
   _renderProgressoCarga();
 }
 function _incrementarProgressoCarga(rotulo){
@@ -3618,29 +3709,52 @@ function _renderProgressoCarga(){
   if (barra) barra.style.width = pct + '%';
   if (texto) texto.textContent = pct + '%';
 
-  // Estimativa simples: extrapola o tempo restante a partir da velocidade
-  // MÉDIA desde o início (tempo decorrido ÷ fração concluída). Não tenta
-  // ser sofisticado (sem suavização entre amostras) — é só uma ideia
-  // aproximada de "quanto falta", não uma promessa exata; por isso só
-  // mostra depois de uns segundos/fração mínima, pra não exibir um
-  // número maluco com base em meio segundo de dado.
-  const elEstimativa = document.getElementById('carga-estimativa');
-  if (elEstimativa && _inicioProgressoCarga) {
-    const decorridoMs = Date.now() - _inicioProgressoCarga;
-    if (pct >= 100) {
-      elEstimativa.textContent = '';
-    } else if (decorridoMs < 3000 || fracao < 0.03) {
-      elEstimativa.textContent = 'Calculando tempo estimado…';
-    } else {
-      const totalEstimadoMs = decorridoMs / fracao;
-      const restanteMs = Math.max(0, totalEstimadoMs - decorridoMs);
-      const restanteSeg = Math.round(restanteMs / 1000);
-      const texto = restanteSeg < 60
-        ? `~${restanteSeg}s restantes`
-        : `~${Math.round(restanteSeg/60)} min restantes`;
-      elEstimativa.textContent = texto;
-    }
+  if (Math.abs(fracao - _ultimaFracaoCarga) > 0.0005) {
+    _ultimaFracaoCarga = fracao;
+    _ultimoAvancoCarga = Date.now();
   }
+  _atualizarEstimativaCarga();
+}
+// "Sincronizando restrições…" -> "restrições" (versão curta pra mensagem de espera)
+function _nomeCurtoEtapa(rotulo){
+  return String(rotulo).replace(/^(Sincronizando|Carregando)\s+/i, '').replace(/…$/, '');
+}
+// Texto sob o percentual. Duas situações bem diferentes:
+// - progresso andando: estimativa pela velocidade média até agora (tempo
+//   decorrido ÷ fração concluída). Só uma ideia aproximada, não promessa.
+// - progresso PARADO há mais de 5s (típico de esperar resposta de rede):
+//   uma contagem regressiva seria mentira — não há como prever quando o
+//   servidor responde. Mostra quanto tempo já está esperando e quais
+//   etapas faltam, que é informação real.
+function _atualizarEstimativaCarga(){
+  const el = document.getElementById('carga-estimativa');
+  if (!el) return;
+  const overlay = document.getElementById('carga-overlay');
+  const fracao = _progressoCarga.feito / _progressoCarga.total;
+  if (!overlay || overlay.style.display === 'none' || fracao >= 1) {
+    el.textContent = '';
+    if (_timerEstimativaCarga) { clearInterval(_timerEstimativaCarga); _timerEstimativaCarga = null; }
+    return;
+  }
+  const agora = Date.now();
+  const decorridoMs = agora - _inicioProgressoCarga;
+  const paradoMs = agora - _ultimoAvancoCarga;
+  if (paradoMs > 5000) {
+    const pend = Array.from(_cargaPendentes).map(_nomeCurtoEtapa);
+    const seg = Math.round(paradoMs / 1000);
+    el.textContent = pend.length
+      ? `Aguardando resposta: ${pend.slice(0,3).join(', ')}${pend.length > 3 ? ` e mais ${pend.length-3}` : ''} · ${seg}s`
+      : `Processando… ${seg}s sem novidades`;
+    return;
+  }
+  if (decorridoMs < 3000 || fracao < 0.03) {
+    el.textContent = 'Calculando tempo estimado…';
+    return;
+  }
+  const restanteSeg = Math.round((decorridoMs * (1 - fracao) / fracao) / 1000);
+  el.textContent = restanteSeg < 60
+    ? `~${Math.max(restanteSeg, 3)}s restantes`
+    : `~${Math.round(restanteSeg / 60)} min restantes`;
 }
 // Variante fracionária — pra processos com pesos desiguais entre etapas
 // (ex: distritos de 0,01MB a 15MB cada), onde tratar cada etapa como "1
@@ -3781,7 +3895,7 @@ function iniciarSincronizacaoProspeccao(){
     let primeiraStatus = true, primeiraHist = true;
     function talvezResolve(){ if (!primeiraStatus && !primeiraHist) resolve(); }
 
-    _fbDb.ref('prospeccao_status').on('value', snapshot => {
+    _fbOnValueSWR('prospeccao_status', snapshot => {
       const dados = snapshot.val() || {};
       const novo = {};
       Object.values(dados).forEach(v => { if (v && v.subId) novo[v.subId] = v; });
@@ -3794,7 +3908,7 @@ function iniciarSincronizacaoProspeccao(){
       }
     }, err => { avisarErroSincronizacao('prospeccao_status', err); primeiraStatus=false; talvezResolve(); });
 
-    _fbDb.ref('prospeccao_historico').on('value', snapshot => {
+    _fbOnValueSWR('prospeccao_historico', snapshot => {
       const dados = snapshot.val() || {};
       const novo = {};
       Object.entries(dados).forEach(([key, entradas]) => {
@@ -3917,7 +4031,7 @@ function iniciarSincronizacaoValidacaoAle(){
   return new Promise((resolve) => {
     if (!_fbAtivo) { resolve(); return; }
     let primeira = true;
-    _fbDb.ref('validacao_ale_status').on('value', snapshot => {
+    _fbOnValueSWR('validacao_ale_status', snapshot => {
       const dados = snapshot.val() || {};
       const novo = {};
       Object.values(dados).forEach(v => { if (v && v.subId) novo[v.subId] = v; });
@@ -4000,7 +4114,7 @@ function iniciarSincronizacaoBaixaPrioridade(){
   return new Promise((resolve) => {
     if (!_fbAtivo) { resolve(); return; }
     let primeira = true;
-    _fbDb.ref('baixa_prioridade_status').on('value', snapshot => {
+    _fbOnValueSWR('baixa_prioridade_status', snapshot => {
       const dados = snapshot.val() || {};
       const novo = {};
       Object.values(dados).forEach(v => { if (v && v.subId) novo[v.subId] = v; });
@@ -4281,7 +4395,7 @@ function iniciarSincronizacaoFuturo(){
   return new Promise((resolve)=>{
     if (!_fbAtivo) { resolve(); return; }
     let primeira = true;
-    _fbDb.ref('futuro_verificacao').on('value', snapshot => {
+    _fbOnValueSWR('futuro_verificacao', snapshot => {
       const dados = snapshot.val() || {};
       const novo = {};
       Object.entries(dados).forEach(([key, v]) => { novo[fbKeyToSql(key)] = v; });
@@ -4410,7 +4524,7 @@ function iniciarSincronizacaoDescarte(){
     let primeiraStatus = true, primeiraLog = true;
     function talvezResolve(){ if (!primeiraStatus && !primeiraLog) resolve(); }
 
-    _fbDb.ref('descarte_status').on('value', snapshot => {
+    _fbOnValueSWR('descarte_status', snapshot => {
       const dados = snapshot.val() || {};
       const novo = {};
       Object.entries(dados).forEach(([key, v]) => { novo[fbKeyToSql(key)] = v; });
@@ -4423,7 +4537,7 @@ function iniciarSincronizacaoDescarte(){
       }
     }, err => { avisarErroSincronizacao('descarte_status', err); primeiraStatus=false; talvezResolve(); });
 
-    _fbDb.ref('descarte_retorno_log').on('value', snapshot => {
+    _fbOnValueSWR('descarte_retorno_log', snapshot => {
       const dados = snapshot.val() || {};
       DESCARTE_RETORNO_LOG_CACHE = Object.entries(dados)
         .map(([k,v])=>({key:k, ...v}))
@@ -4818,6 +4932,105 @@ function atualizarIndicadorSync(estado) {
   el.textContent = estado==='ok' ? '🟢 Sincronizado com a equipe' : (estado==='erro' ? '🔴 Sem conexão — salvando só localmente' : '🟡 Conectando...');
 }
 
+// ── Estado salvo da última visita (stale-while-revalidate) ─────────────
+// Abrir o app exigia esperar a PRIMEIRA resposta ao vivo de cada canal do
+// Firebase (restrições, prospecções, vínculos...) — e em rede lenta isso
+// era o grosso da espera. Agora cada resposta ao vivo também é guardada no
+// navegador (IndexedDB); na abertura seguinte o app usa esse estado salvo
+// NA HORA (as cores já saem certas pra quem não mudou nada) e confere com
+// o servidor em segundo plano:
+//  - se a resposta ao vivo for IGUAL ao salvo: não faz nada;
+//  - se for DIFERENTE (alguém da equipe mexeu desde a última visita):
+//    aplica, agrupando tudo num redesenho só (ver _fbAplicarPendentes).
+// Sem estado salvo (primeira visita, cache limpo, ou salvo há mais de 14
+// dias) o comportamento é o de sempre: espera o servidor.
+const FB_SEED_PREFIXO = 'fb:';
+const FB_SEED_IDADE_MAX_MS = 14 * 24 * 3600 * 1000;
+const FB_SEED_CAMINHOS = ['lotes_status','prospeccao_status','prospeccao_historico','descarte_status','descarte_retorno_log',
+  'futuro_verificacao','empreendimento_ignorado','vinculos_composicao','validacao_ale_status','baixa_prioridade_status'];
+const FB_SEED_ATRASO_MS = 800;
+const _fbSeedPendentes = new Map();   // caminho -> função que aplica a resposta ao vivo adiada (a mais recente vence)
+let _fbSeedTimer = null;
+function _fbAgendarAplicacao(caminho, fn){
+  _fbSeedPendentes.set(caminho, fn);
+  if (_fbSeedTimer) clearTimeout(_fbSeedTimer);
+  _fbSeedTimer = setTimeout(_fbAplicarPendentes, FB_SEED_ATRASO_MS);
+}
+function _fbAplicarPendentes(){
+  _fbSeedTimer = null;
+  if (!_bootConcluido) { _fbSeedTimer = setTimeout(_fbAplicarPendentes, 500); return; } // não mexe no mapa no meio da abertura
+  if (!_fbSeedPendentes.size) return;
+  const tarefas = Array.from(_fbSeedPendentes.values());
+  _fbSeedPendentes.clear();
+  // Cada callback de sincronização redesenha o mapa inteiro sozinho —
+  // aplicar 3 ou 4 de uma vez seria 3 ou 4 redesenhos completos em
+  // sequência (travada). Suprime os redesenhos individuais enquanto os
+  // DADOS são aplicados e faz UM só, em lotes, no final.
+  const orig = { rm: renderQuadraMarkers, rl: renderQuadraList, sq: selectQuadra };
+  renderQuadraMarkers = () => {}; renderQuadraList = () => {}; selectQuadra = () => {};
+  try {
+    tarefas.forEach(t => { try { t(); } catch(e) { console.warn('Falha ao aplicar atualização do servidor:', e); } });
+  } finally {
+    renderQuadraMarkers = orig.rm; renderQuadraList = orig.rl; selectQuadra = orig.sq;
+  }
+  (async () => {
+    try { await _filtrarERenderizarEmLotes(0, 1, null); } catch(e) { console.warn('Falha ao redesenhar após atualização do servidor:', e); }
+    if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
+  })();
+}
+// Substitui _fbDb.ref(caminho).on('value', cb, errCb) nos canais que
+// afetam a cor das composições. Os callbacks só usam snapshot.val().
+function _fbOnValueSWR(caminho, cb, errCb){
+  (async () => {
+    let seed = null;
+    try {
+      const reg = await _cacheGet(FB_SEED_PREFIXO + caminho);
+      if (reg && typeof reg.ts === 'number' && (Date.now() - reg.ts) < FB_SEED_IDADE_MAX_MS) seed = reg;
+    } catch(e) { seed = null; }
+
+    const norm = v => (v === undefined ? null : v);
+    let jsonSeed = null;
+    if (seed) {
+      try {
+        jsonSeed = JSON.stringify(norm(seed.dados));
+        cb({ val: () => norm(seed.dados) });   // mesmo caminho do 1º snapshot de verdade: aplica os dados e libera a abertura
+        // O callback de restrições marca "Sincronizado" — mentira enquanto só temos o salvo.
+        if (caminho === 'lotes_status') atualizarIndicadorSync('conectando');
+      } catch(e) { console.warn('Estado salvo de', caminho, 'não pôde ser aplicado:', e); seed = null; }
+    }
+
+    let primeiroAoVivo = true;
+    _fbDb.ref(caminho).on('value', snap => {
+      const valor = norm(snap.val());
+      _cacheSet(FB_SEED_PREFIXO + caminho, { ts: Date.now(), dados: valor });
+      if (seed && primeiroAoVivo) {
+        primeiroAoVivo = false;
+        if (caminho === 'lotes_status') atualizarIndicadorSync('ok');
+        if (JSON.stringify(valor) === jsonSeed) return;           // nada mudou desde a última visita
+        _fbAgendarAplicacao(caminho, () => cb(snap));            // mudou: aplica agrupado
+        return;
+      }
+      primeiroAoVivo = false;
+      // Se já há uma atualização adiada pra esse canal, a mais nova entra no lugar dela
+      // (senão a antiga, aplicada depois, sobrescreveria a nova).
+      if (_fbSeedPendentes.has(caminho)) { _fbAgendarAplicacao(caminho, () => cb(snap)); return; }
+      cb(snap);
+    }, errCb);
+  })();
+}
+// Ao sair da conta, apaga o estado salvo (não deixa dados da equipe no navegador).
+function _fbSeedLimpar(){
+  return new Promise(async resolve => {
+    try {
+      const db = await _cacheDBPromise;
+      if (!db) { resolve(); return; }
+      const tx = db.transaction(CACHE_STORE, 'readwrite');
+      FB_SEED_CAMINHOS.forEach(c => tx.objectStore(CACHE_STORE).delete(FB_SEED_PREFIXO + c));
+      tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+    } catch(e) { resolve(); }
+  });
+}
+
 // Escuta o banco em tempo real: a primeira leitura resolve a promessa (usada
 // no carregamento inicial); leituras seguintes (mudanças de qualquer pessoa
 // da equipe, inclusive vindas de outro navegador) atualizam a tela sozinhas.
@@ -4829,7 +5042,7 @@ function iniciarSincronizacaoLotes() {
 
     const conectarBanco = () => {
       let primeira = true;
-      _fbDb.ref('lotes_status').on('value', snapshot => {
+      _fbOnValueSWR('lotes_status', snapshot => {
         const dados = snapshot.val() || {};
         const novo = {};
         Object.entries(dados).forEach(([key, v]) => {
@@ -5303,6 +5516,20 @@ function iniciarCapturaMapa(){
     tinhaBusca: !!(typeof searchMarker !== 'undefined' && searchMarker && map.hasLayer(searchMarker)),
   };
 
+  // A imagem do e-mail é montada a partir dos <img> de tile do Leaflet
+  // (ver _renderizarMapaParaCanvas). O OpenFreeMap é vetorial/WebGL — não
+  // tem <img> de tile, e a imagem sairia com o fundo branco. Durante a
+  // captura usa o OpenStreetMap em imagem (o que a captura já suporta) e
+  // devolve o OpenFreeMap quando sair do modo.
+  if (_basemapEhVetorial(basemapMapa)) {
+    _captura.basemapVetorialGuardado = basemapMapa;
+    const estavaNoMapa = map.hasLayer(basemapMapa);
+    if (estavaNoMapa) map.removeLayer(basemapMapa);
+    basemapMapa = L.tileLayer(TILES_MAPA, {attribution: ATTR_MAPA, maxZoom: 19, crossOrigin: TILES_COM_CORS});
+    basemapMapa.on('tileerror', _onTileError);
+    if (estavaNoMapa) basemapMapa.addTo(map);
+  }
+
   // Tira do mapa TUDO que não é a composição em análise
   _captura.ativas.forEach(n => map.removeLayer(layers[n]));
   if (_captura.tinhaLotes) map.removeLayer(lotesLayer);       // some também com os nºs dos lotes
@@ -5421,6 +5648,12 @@ function sairModoCaptura(voltarAoModal){
   document.getElementById('captura-barra').style.visibility = 'visible';
 
   if (_captura) {
+    if (_captura.basemapVetorialGuardado) {
+      const estavaNoMapa = map.hasLayer(basemapMapa);
+      if (estavaNoMapa) map.removeLayer(basemapMapa);
+      basemapMapa = _captura.basemapVetorialGuardado;
+      if (estavaNoMapa) { basemapMapa.addTo(map); _vigiarOpenFreeMap(basemapMapa); }
+    }
     if (_captura.layer) map.removeLayer(_captura.layer);
     _captura.ativas.forEach(n => { if (layers[n]) layers[n].addTo(map); });
     if (_captura.tinhaLotes && lotesLayer) lotesLayer.addTo(map);
@@ -6612,7 +6845,7 @@ function iniciarSincronizacaoVinculos(){
   return new Promise((resolve) => {
     if (!_fbAtivo) { resolve(); return; }
     let primeira = true;
-    _fbDb.ref('vinculos_composicao').on('value', snapshot => {
+    _fbOnValueSWR('vinculos_composicao', snapshot => {
       VINCULOS_CACHE = snapshot.val() || {};
       if (primeira) { primeira = false; resolve(); }
       else {
@@ -6763,7 +6996,7 @@ function iniciarSincronizacaoEmpreendimentoIgnorado() {
   return new Promise((resolve) => {
     if (!_fbAtivo) { resolve(); return; }
     let primeira = true;
-    _fbDb.ref('empreendimento_ignorado').on('value', snapshot => {
+    _fbOnValueSWR('empreendimento_ignorado', snapshot => {
       const dados = snapshot.val() || {};
       const novo = {};
       Object.keys(dados).forEach(key => { novo[fbKeyToSql(key)] = true; });
@@ -9049,13 +9282,15 @@ function iniciarApp(){
   // ainda desenhava ~6 mil polígonos de uma vez só, e era exatamente esse
   // trecho invisível que travava a aba com o aviso de página sem resposta).
   const PESO_DISTRITOS = 0.55, PESO_OUTRAS = 0.15, PESO_DESENHO = 0.30;
-  const TOTAL_OUTRAS_TAREFAS = 11;
+  const TOTAL_OUTRAS_TAREFAS = 10;
   let outrasFeitas = 0;
   function progressoOutraTarefa(rotulo){
     outrasFeitas++;
+    _cargaPendentes.delete(rotulo);
     _definirProgressoCarga(PESO_DISTRITOS + (outrasFeitas/TOTAL_OUTRAS_TAREFAS)*PESO_OUTRAS, rotulo);
   }
   function comProgressoPonderado(promessa, rotulo){
+    _cargaPendentes.add(rotulo); // fica registrada até terminar — aparece na tela se a espera for longa
     return promessa.then(r => { progressoOutraTarefa(rotulo); return r; }, e => { progressoOutraTarefa(rotulo); throw e; });
   }
 
@@ -9069,23 +9304,27 @@ function iniciarApp(){
   carregarItbiComparaveis();
   carregarItbiVizinhanca();
   carregarProprietarios();
+  iniciarSincronizacaoProprietarios(); // nomes cadastrados à mão — só exibição, também em segundo plano
 
   Promise.all([
     comProgressoPonderado(_comTimeout(iniciarSincronizacaoLotes(), 75000, 'lotes_status'), 'Sincronizando restrições…'),
     comProgressoPonderado(_comTimeout(iniciarSincronizacaoProspeccao(), 75000, 'prospeccao_status'), 'Sincronizando prospecções…'),
     comProgressoPonderado(_comTimeout(iniciarSincronizacaoDescarte(), 75000, 'descarte_status'), 'Sincronizando descartes…'),
     comProgressoPonderado(_comTimeout(iniciarSincronizacaoFuturo(), 75000, 'futuro_status'), 'Sincronizando futuros lançamentos…'),
-    comProgressoPonderado(_comTimeout(iniciarSincronizacaoProprietarios(), 75000, 'proprietarios_cache'), 'Sincronizando proprietários…'),
     comProgressoPonderado(_comTimeout(iniciarSincronizacaoEmpreendimentoIgnorado(), 75000, 'empreendimento_ignorado'), 'Sincronizando empreendimentos ignorados…'),
     comProgressoPonderado(_comTimeout(iniciarSincronizacaoVinculos(), 75000, 'vinculos'), 'Sincronizando vínculos…'),
     comProgressoPonderado(_comTimeout(iniciarSincronizacaoValidacaoAle(), 75000, 'validacao_ale_status'), 'Sincronizando validações…'),
     comProgressoPonderado(_comTimeout(iniciarSincronizacaoBaixaPrioridade(), 75000, 'baixa_prioridade_status'), 'Sincronizando baixa prioridade…'),
     comProgressoPonderado(_comTimeout(carregarTombamento(), 75000, 'tombamento_*.json'), 'Carregando bens tombados…'),
     comProgressoPonderado(_comTimeout(carregarAreasProtegidas(), 75000, 'areas_protegidas.json'), 'Carregando áreas envoltórias…'),
-    _comTimeout(
-      carregarDistritosIniciais(frac => _definirProgressoCarga(frac*PESO_DISTRITOS, `Carregando bairros iniciais… ${Math.round(frac*100)}%`)),
-      120000, 'distritos iniciais'
-    ),
+    (() => {
+      const rotuloBairros = 'bairros iniciais';
+      _cargaPendentes.add(rotuloBairros);
+      return _comTimeout(
+        carregarDistritosIniciais(frac => _definirProgressoCarga(frac*PESO_DISTRITOS, `Carregando bairros iniciais… ${Math.round(frac*100)}%`)),
+        120000, 'distritos iniciais'
+      ).then(r => { _cargaPendentes.delete(rotuloBairros); return r; });
+    })(),
   ]).then(async () => {
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
     await repararProspeccoesAposUnificacao(); // corrige prospecções gravadas antes da unificação de quadras
