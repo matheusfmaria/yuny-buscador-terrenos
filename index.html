@@ -3556,17 +3556,15 @@ try {
   _fbApp = (firebase.apps && firebase.apps.find(a=>a.name===APP_NAME))
     || firebase.initializeApp(firebaseConfig, APP_NAME);
   _fbDb = firebase.database(_fbApp);
-  // O Firebase tenta WebSocket primeiro ("assume falha até provar o
-  // contrário") e só cai pro modo alternativo (long-polling) depois de
-  // esperar ~30s se a conexão ficar pendurada. Em rede corporativa com
-  // proxy que segura/inspeciona WebSocket, isso fazia TODAS as
-  // sincronizações demorarem o mesmo tanto na abertura (visto no console:
-  // as 9 estourando juntas). Forçar long-polling desde o início pula essa
-  // espera — um pouco menos eficiente que WebSocket em rede boa, mas
-  // conecta de primeira em qualquer rede. Pra comparar/voltar ao
-  // comportamento antigo: abra o app com ?ws=1 no final do endereço.
+  // Opcional: abrir o app com ?lp=1 no final do endereço força o Firebase a
+  // usar long-polling em vez de WebSocket. Era o padrão nas versões 217-219,
+  // por uma suspeita (WebSocket pendurado em rede corporativa) que se baseou
+  // em avisos de "tempo esgotado" que eram alarme falso — sem evidência real
+  // de que ajuda, o padrão voltou a ser o comportamento normal do Firebase.
+  // Fica como interruptor pra comparar quando o diagnóstico da abertura
+  // (perfAbertura) mostrar se as sincronizações de fato demoram.
   try {
-    if (!/[?&]ws=1\b/.test(location.search) && _fbDb.INTERNAL && typeof _fbDb.INTERNAL.forceLongPolling === 'function') {
+    if (/[?&]lp=1\b/.test(location.search) && _fbDb.INTERNAL && typeof _fbDb.INTERNAL.forceLongPolling === 'function') {
       _fbDb.INTERNAL.forceLongPolling();
     }
   } catch(e) { console.warn('Não foi possível forçar long-polling no Firebase:', e); }
@@ -3827,10 +3825,22 @@ function _definirProgressoCarga(fracao, rotulo){
 // (ex: um listener do Firebase que só demorou, não quebrou de verdade);
 // só o BOOT não fica mais esperando por ela pra sempre.
 function _comTimeout(promessa, ms, nome){
-  return Promise.race([
-    promessa,
-    new Promise(resolve => setTimeout(() => { _perfMarcar('TEMPO ESGOTADO: ' + nome); console.warn(`Tempo esgotado esperando: ${nome} (${ms/1000}s) — seguindo sem essa etapa por ora.`); resolve(); }, ms)),
-  ]);
+  // O alarme PRECISA ser cancelado quando a etapa termina dentro do prazo.
+  // Uma versão anterior não cancelava: o aviso "Tempo esgotado" aparecia no
+  // vencimento mesmo com a etapa concluída há muito tempo — alarme falso
+  // que me levou (e a você) a diagnosticar lentidão de rede que não existia
+  // naquela forma.
+  let alarme;
+  const prazo = new Promise(resolve => {
+    alarme = setTimeout(() => {
+      _perfMarcar('TEMPO ESGOTADO: ' + nome);
+      console.warn(`Tempo esgotado esperando: ${nome} (${ms/1000}s) — seguindo sem essa etapa por ora.`);
+      resolve();
+    }, ms);
+  });
+  const cancelar = () => clearTimeout(alarme);
+  promessa.then(cancelar, cancelar);
+  return Promise.race([promessa, prazo]);
 }
 function _comProgressoCarga(promessa, rotulo){
   return promessa.then(
@@ -9359,6 +9369,7 @@ function iniciarApp(){
   function progressoOutraTarefa(rotulo){
     outrasFeitas++;
     _cargaPendentes.delete(rotulo);
+    _perfMarcar('etapa concluída: ' + _nomeCurtoEtapa(rotulo));
     _definirProgressoCarga(PESO_DISTRITOS + (outrasFeitas/TOTAL_OUTRAS_TAREFAS)*PESO_OUTRAS, rotulo);
   }
   function comProgressoPonderado(promessa, rotulo){
@@ -9395,7 +9406,7 @@ function iniciarApp(){
       return _comTimeout(
         carregarDistritosIniciais(frac => _definirProgressoCarga(frac*PESO_DISTRITOS, `Carregando bairros iniciais… ${Math.round(frac*100)}%`)),
         120000, 'distritos iniciais'
-      ).then(r => { _cargaPendentes.delete(rotuloBairros); return r; });
+      ).then(r => { _cargaPendentes.delete(rotuloBairros); _perfMarcar('etapa concluída: bairros iniciais'); return r; });
     })(),
   ]).then(async () => {
     _perfMarcar('todas as etapas de carga terminaram (ou estouraram o tempo)');
