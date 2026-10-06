@@ -1809,7 +1809,29 @@ function comparaveisRecentes(){
   const limite = new Date();
   limite.setFullYear(limite.getFullYear() - AVAL_ANOS);
   _AVAL_RECENTES_CACHE = ITBI_COMPARAVEIS.filter(c => new Date(c.d) >= limite);
+  _AVAL_GRADE = null;   // a grade depende desta lista
   return _AVAL_RECENTES_CACHE;
+}
+// Índice espacial (grade de ~1,1km) dos comparáveis recentes. Sem ele,
+// avaliarTerreno varria a lista INTEIRA (dezenas de milhares) até 6 vezes
+// por composição, e isso é calculado pras ~6 mil composições na abertura:
+// medido com os dados reais, era ~55% do tempo — dezenas de segundos de
+// tela presa. A grade guarda só os ÍNDICES dos comparáveis por célula.
+let _AVAL_GRADE = null;
+const AVAL_GRID_CELULA = 0.01;
+function _gradeComparaveis(){
+  if (_AVAL_GRADE) return _AVAL_GRADE;
+  const todos = comparaveisRecentes();
+  const grade = new Map();
+  for (let i = 0; i < todos.length; i++) {
+    const c = todos[i];
+    const k = Math.floor(c.lat / AVAL_GRID_CELULA) + ',' + Math.floor(c.lon / AVAL_GRID_CELULA);
+    let b = grade.get(k);
+    if (!b) { b = []; grade.set(k, b); }
+    b.push(i);
+  }
+  _AVAL_GRADE = grade;
+  return grade;
 }
 
 function avaliarTerreno(lat, lon, refAlvo, areaAlvo, zonaAlvo){
@@ -1824,12 +1846,28 @@ function avaliarTerreno(lat, lon, refAlvo, areaAlvo, zonaAlvo){
   // candidatos — ordenar só esses é ordens de grandeza mais barato.
   const cosLat = Math.cos(lat * Math.PI / 180);
   let sel = null, raioUsado = AVAL_RAIOS[AVAL_RAIOS.length - 1];
+  const grade = _gradeComparaveis();
   for (const raio of AVAL_RAIOS) {
     const dLat = raio / 111.32;
     const dLon = raio / (111.32 * (cosLat || 1e-6));
+    // só olha as células da grade que cruzam a caixa deste raio
+    const cyMin = Math.floor((lat - dLat) / AVAL_GRID_CELULA), cyMax = Math.floor((lat + dLat) / AVAL_GRID_CELULA);
+    const cxMin = Math.floor((lon - dLon) / AVAL_GRID_CELULA), cxMax = Math.floor((lon + dLon) / AVAL_GRID_CELULA);
+    const idxs = [];
+    for (let cy = cyMin; cy <= cyMax; cy++) {
+      for (let cx = cxMin; cx <= cxMax; cx++) {
+        const b = grade.get(cy + ',' + cx);
+        if (b) for (let j = 0; j < b.length; j++) idxs.push(b[j]);
+      }
+    }
+    // Reordena pela posição original no array: o resultado fica IDÊNTICO ao
+    // da varredura completa de antes (importa nos empates de distância —
+    // vários comparáveis compartilham o mesmo ponto — na hora do corte
+    // pelos AVAL_MAX_COMPARAVEIS mais próximos).
+    idxs.sort((a, b) => a - b);
     const dentro = [];
-    for (let i = 0; i < todos.length; i++) {
-      const c = todos[i];
+    for (let j = 0; j < idxs.length; j++) {
+      const c = todos[idxs[j]];
       // descarte barato: só compara coordenadas, sem raiz quadrada
       if (Math.abs(c.lat - lat) > dLat || Math.abs(c.lon - lon) > dLon) continue;
       const dist = distanciaKm(lat, lon, c.lat, c.lon);
@@ -2691,6 +2729,7 @@ async function carregarDistrito(nomeDistrito, opcoes={}){
     // invalida caches que dependiam do conjunto de dados anterior
     _avalScoreCache.clear();
     if (typeof _AVAL_RECENTES_CACHE !== 'undefined') _AVAL_RECENTES_CACHE = null;
+    if (typeof _AVAL_GRADE !== 'undefined') _AVAL_GRADE = null;
 
     regioesCarregadas.add(nomeDistrito);
     _carregandoRegiao = null;
@@ -2724,11 +2763,13 @@ async function _filtrarERenderizarEmLotes(progressoDe, progressoAte, atualizarPr
     if(hideOU&&q.ou) return false;
     return getSubGroups(q).some(s => subPassaFiltrosNumericos(q, s));
   });
+  _perfMarcar('filtros aplicados (score e composição das ' + QUADRAS.length.toLocaleString('pt-BR') + ' quadras calculados)');
   const tot=visibleQuadras.reduce((s,q)=>s+q.area,0);
   document.getElementById('q-count-label').innerHTML=`<strong>${visibleQuadras.length.toLocaleString('pt-BR')}</strong> quadras`;
   document.getElementById('q-area-label').textContent=`${(tot/10000).toFixed(1)} ha total`;
   document.getElementById('map-info').textContent=`🗺 ${visibleQuadras.length.toLocaleString('pt-BR')} composições no mapa`;
   renderQuadraList();
+  _perfMarcar('lista lateral montada');
   await renderQuadraMarkersEmLotes(800, pct => {
     if (atualizarProgresso) atualizarProgresso(progressoDe + (pct/100)*(progressoAte-progressoDe), `Desenhando o mapa… ${pct}%`);
   });
@@ -3218,6 +3259,11 @@ function loteEhTombado(sql){
       if (!_gradeTombamentoAreas) _gradeTombamentoAreas = _construirGradeDeAreas(TOMBAMENTO_AREAS);
       let lotePoly = null;
       for (const area of _candidatosDaGrade(_gradeTombamentoAreas, minX, minY, maxX, maxY)) {
+        // a célula da grade (~2km) traz candidatos que NÃO encostam no lote —
+        // descarta por caixa antes de gastar a interseção geométrica (é o que
+        // mais pesava no Turf, medido com dados reais)
+        const bb = area.bbox;
+        if (maxX < bb[0] || minX > bb[2] || maxY < bb[1] || minY > bb[3]) continue;
         try {
           if (!lotePoly) lotePoly = turf.polygon([anelFechado]);
           if (turf.booleanIntersects(lotePoly, turf.polygon(area.geometry.coordinates))) { resultado = area; break; }
@@ -6772,6 +6818,11 @@ function loteEmAreaProtegida(sql){
       if (!_gradeAreasProtegidas) _gradeAreasProtegidas = _construirGradeDeAreas(AREAS_PROTEGIDAS);
       let lotePoly = null;
       for (const area of _candidatosDaGrade(_gradeAreasProtegidas, minX, minY, maxX, maxY)) {
+        // a célula da grade (~2km) traz candidatos que NÃO encostam no lote —
+        // descarta por caixa antes de gastar a interseção geométrica (é o que
+        // mais pesava no Turf, medido com dados reais)
+        const bb = area.bbox;
+        if (maxX < bb[0] || minX > bb[2] || maxY < bb[1] || minY > bb[3]) continue;
         try {
           if (!lotePoly) lotePoly = turf.polygon([anelFechado]);
           if (turf.booleanIntersects(lotePoly, turf.polygon(area.geometry.coordinates))) { resultado = area; break; }
@@ -9476,6 +9527,11 @@ async function carregarItbiComparaveis(){
     console.warn('Falha ao carregar comparáveis de ITBI — avaliação preliminar e o fator de margem no score ficam indisponíveis até recarregar a página.', e);
   }
   itbiComparaveisCarregado = true;
+  // A lista "recente" e a grade nascem da lista completa — se algum cálculo
+  // rodou ANTES dos dados chegarem, elas ficaram vazias em cache e o score
+  // ficaria neutro pro resto da sessão. Reinicia SEMPRE, não só depois da
+  // abertura (antes só o cache de score era limpo, e só depois dela).
+  _AVAL_RECENTES_CACHE = null; _AVAL_GRADE = null; _avalScoreCache.clear();
   // Enquanto os dados não tinham chegado, qualquer composição já
   // renderizada calculou (e cacheou) o fator de avaliação do score como 0
   // (fatorAvaliacaoScore trata falta de dado como neutro) — limpa esse
@@ -9570,7 +9626,9 @@ function iniciarApp(){
   ]).then(async () => {
     _perfMarcar('todas as etapas de carga terminaram (ou estouraram o tempo)');
     await processarExpiracaoDescartes(); // devolve ao normal quem já passou dos 6 meses
+    _perfMarcar('descartes vencidos processados');
     await repararProspeccoesAposUnificacao(); // corrige prospecções gravadas antes da unificação de quadras
+    _perfMarcar('prospecções reparadas');
     // Perímetros só das regiões que NÃO vieram pré-carregadas — desenhados
     // depois de carregarDistritosIniciais() já ter marcado as 21 iniciais
     // como carregadas, senão elas apareceriam com o perímetro por cima.
