@@ -418,6 +418,15 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
   font-size:10px;font-weight:700;border-radius:99px;min-width:16px;height:16px;line-height:16px;
   text-align:center;padding:0 4px;box-shadow:0 0 0 2px #fff}
 #dash-badge-count.show{display:block}
+#pipeline-badge-count{display:none;position:absolute;top:-6px;right:-6px;background:#c62828;color:#fff;
+  font-size:10px;font-weight:700;border-radius:99px;min-width:16px;height:16px;line-height:16px;
+  text-align:center;padding:0 4px;box-shadow:0 0 0 2px #fff}
+#pipeline-badge-count.show{display:block}
+.pipe-aviso{background:#fff4e5;border:1px solid #f0b46a;border-radius:6px;padding:8px 10px;margin-top:8px;
+  font-size:11.5px;color:#7a4a00;line-height:1.5}
+.pipe-aviso .acoes{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
+.pipe-aviso .acoes button{font-size:11px;padding:4px 9px;border-radius:5px;border:1px solid #c9a15a;
+  background:#fff;color:#7a4a00;cursor:pointer;font-weight:600}
 
 /* ── VIZINHANÇA ITBI (referência de valor por m² de terreno) ──────── */
 .viz-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
@@ -556,6 +565,9 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
   <div class="tb-right">
     <span id="total-badge" class="tb-sub"></span>
     <span id="user-chip"><span class="nome" id="user-nome"></span><button onclick="sairDaConta()">Sair</button></span>
+    <button class="btn" id="btn-checagem-pipeline" onclick="abrirChecagemPipeline()" style="position:relative" title="Áreas no pipeline que precisam ser conferidas no sistema da Kamila (a cada 30 dias)">
+      🔄 Checagem do pipeline<span id="pipeline-badge-count"></span>
+    </button>
     <button class="btn" id="btn-dashboard-ale" onclick="abrirDashboardValidacaoAle()" style="position:relative;border-color:#fbc02d;color:#8d6e00">
       ✅ Validar com Ale<span id="dash-ale-badge-count"></span>
     </button>
@@ -882,6 +894,19 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     </div>
     <div class="viz-modal-ft">
       <button onclick="document.getElementById('aval-overlay').classList.remove('on')">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── CHECAGEM DO PIPELINE (a cada 30 dias) ──────────────────────────── -->
+<div class="dash-overlay" id="pipeline-overlay">
+  <div class="dash-modal">
+    <h3>🔄 Checagem do pipeline</h3>
+    <div class="sub">A cada 30 dias, confira no pipeline (sistema da Kamila) se cada área "No pipeline" segue ativa por lá — assim os dois sistemas não ficam divergentes (por exemplo: descartada em um e ainda ativa no outro).</div>
+    <div id="pipeline-conteudo"></div>
+    <div class="dash-footer" style="gap:8px">
+      <button onclick="exportarChecagemPipeline()" style="background:#fff;color:#1a2e1a;border:1px solid #1a2e1a">⬇ Exportar lista (.csv)</button>
+      <button onclick="fecharChecagemPipeline()">Fechar</button>
     </div>
   </div>
 </div>
@@ -4369,6 +4394,165 @@ function composicaoDoLote(qidBase, loteNum){
   const candidata = QUADRAS.find(q => q.id.split('-')[0] === qidBase && q.lotes.includes(loteNum));
   return candidata ? candidata.id : qidBase;
 }
+// ══════════════════════════════════════════════════════════════════════
+// CHECAGEM DO PIPELINE — a cada DIAS_CHECAGEM_PIPELINE dias, toda área "No
+// pipeline" precisa ser conferida no sistema da Kamila. O acompanhamento
+// das negociações passou a ser feito lá; aqui só garantimos que os dois
+// sistemas não divirjam (ex: descartada em um e ainda ativa no outro).
+// O sistema NÃO consegue ler o pipeline sozinho — a checagem é uma
+// confirmação manual, registrada (data da última) e cobrada no prazo.
+// Data de envio = status.dataEnvio (gravada ao clicar em "Concluído");
+// data da última checagem = status.ultimaChecagem (vale o envio até a 1ª).
+// ══════════════════════════════════════════════════════════════════════
+const DIAS_CHECAGEM_PIPELINE = 30;
+function dataCurtaBR(iso){
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+}
+function statusChecagemPipeline(st){
+  const base = st.ultimaChecagem || st.dataEnvio || null;
+  const dias = diasDesde(base);
+  // sem nenhuma data gravada: não dá pra provar que foi checada — cobra a checagem
+  const vencida = dias === null || dias >= DIAS_CHECAGEM_PIPELINE;
+  const proxima = base ? new Date(new Date(base).getTime() + DIAS_CHECAGEM_PIPELINE*86400000) : null;
+  return { base, checou: !!st.ultimaChecagem, dias, vencida, proxima,
+           diasRestantes: dias === null ? 0 : Math.max(0, DIAS_CHECAGEM_PIPELINE - dias) };
+}
+// Uma linha por NEGOCIAÇÃO: composições vinculadas contam como uma área só
+// (a checagem de uma vale pras outras — ver registrarChecagemPipeline).
+function listaChecagemPipeline(){
+  const todas = Object.values(PROSPECCAO_STATUS_CACHE);
+  const vistos = new Set(), linhas = [];
+  todas.forEach(st => {
+    if (vistos.has(st.subId)) return;
+    let grupo = [st];
+    const gv = grupoVinculoDoSubId(st.subId);
+    if (gv) {
+      const ids = new Set(gv.membros.map(m => { const sa = subAtualDoMembroVinculo(m); return sa ? sa.subId : m.subId; }));
+      const doGrupo = todas.filter(x => ids.has(x.subId));
+      if (doGrupo.length) grupo = doGrupo;
+    }
+    grupo.forEach(x => vistos.add(x.subId));
+    // se QUALQUER membro estiver mais atrasado, é ele que decide o prazo do grupo
+    const avaliados = grupo.map(x => ({x, chk: statusChecagemPipeline(x)}));
+    const pior = avaliados.reduce((a,b) => ((b.chk.dias === null ? Infinity : b.chk.dias) > (a.chk.dias === null ? Infinity : a.chk.dias) ? b : a));
+    const principal = pior.x;
+    const resolvido = subAtualDaProspeccao(principal);
+    linhas.push({
+      subId: principal.subId, extras: grupo.length - 1, bairro: principal.bairro || '',
+      corretor: principal.corretor || '', area: grupo.reduce((s,x) => s + (x.area || 0), 0),
+      dataEnvio: principal.dataEnvio, chk: pior.chk,
+      irQid: principal.qid, irSubId: resolvido ? resolvido.subId : principal.subId,
+    });
+  });
+  linhas.sort((a,b) => (b.chk.dias === null ? 1e9 : b.chk.dias) - (a.chk.dias === null ? 1e9 : a.chk.dias));
+  return linhas;
+}
+function contarChecagensPendentesPipeline(){ return listaChecagemPipeline().filter(l => l.chk.vencida).length; }
+
+async function registrarChecagemPipeline(subId, _pulandoPropagacao){
+  const st = PROSPECCAO_STATUS_CACHE[subId];
+  if (!st) return;
+  const novo = {...st, ultimaChecagem: new Date().toISOString()};
+  PROSPECCAO_STATUS_CACHE[subId] = novo;   // otimista
+  if (_fbAtivo) {
+    // grava o registro inteiro (mesmo formato de marcarProspeccaoAtiva), não só o campo novo
+    try { await _fbDb.ref('prospeccao_status/'+sqlToFbKey(subId)).set(novo); }
+    catch(e) { console.warn('Não foi possível salvar a checagem do pipeline:', e); }
+  }
+  // composições vinculadas são a mesma negociação — a checagem vale pras duas
+  if (!_pulandoPropagacao) {
+    const grupo = grupoVinculoDoSubId(subId);
+    if (grupo) {
+      for (const membro of grupo.membros) {
+        const sub = subAtualDoMembroVinculo(membro);
+        if (!sub || sub.subId === subId || !PROSPECCAO_STATUS_CACHE[sub.subId]) continue;
+        await registrarChecagemPipeline(sub.subId, true);
+      }
+    }
+  }
+}
+async function confirmarChecagemPipeline(subId){
+  await registrarChecagemPipeline(subId);
+  await adicionarHistoricoComposicao(subId, `Checagem de ${DIAS_CHECAGEM_PIPELINE} dias: confirmado no pipeline que a área segue ativa`, null);
+  if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
+  atualizarChecagemPipelineSeAberta();
+  mostrarToast(`Checagem registrada — a próxima fica pra daqui a ${DIAS_CHECAGEM_PIPELINE} dias.`);
+}
+function construirChecagemPipeline(){
+  const linhas = listaChecagemPipeline();
+  const pendentes = linhas.filter(l => l.chk.vencida).length;
+  const areaTotal = linhas.reduce((s,l) => s + l.area, 0);
+  if (!linhas.length) return '<div style="font-size:12px;color:#888;padding:10px 0">Nenhuma área no pipeline no momento.</div>';
+  const cards = `
+    <div class="dash-cards">
+      <div class="dash-card"><div class="n">${linhas.length}</div><div class="l">No pipeline</div></div>
+      <div class="dash-card ${pendentes?'alerta':''}"><div class="n">${pendentes}</div><div class="l">Checagem pendente (${DIAS_CHECAGEM_PIPELINE}+ dias)</div></div>
+      <div class="dash-card"><div class="n">${(areaTotal/1000).toFixed(1)}k</div><div class="l">m² no pipeline</div></div>
+    </div>`;
+  const linhasHtml = linhas.map(l => {
+    const bairroJs = l.bairro.replace(/'/g, "\\'");
+    return `
+      <tr class="${l.chk.vencida ? 'alerta' : ''}">
+        <td><strong>${escapeHtmlHistorico(l.subId)}</strong>${l.extras ? `<div style="font-size:10px;color:#888">+ ${l.extras} vinculada${l.extras===1?'':'s'}</div>` : ''}</td>
+        <td>${escapeHtmlHistorico(l.bairro)}</td>
+        <td>${dataCurtaBR(l.dataEnvio)}</td>
+        <td>${l.chk.checou ? dataCurtaBR(l.chk.base) : '<span style="color:#aaa">— (vale o envio)</span>'}</td>
+        <td>${l.chk.vencida
+          ? `<span class="dash-alerta-pill">⚠️ ${l.chk.dias !== null ? l.chk.dias + ' dias' : 'sem data'}</span>`
+          : `<span style="color:#2e7d32">em dia · próxima ${dataCurtaBR(l.chk.proxima)}</span>`}</td>
+        <td style="white-space:nowrap">
+          <button class="dash-row-btn" onclick="irParaComposicaoDashboard('${l.irQid}','${l.irSubId}','${bairroJs}')">Ver</button>
+          <button class="dash-row-btn" style="border-color:#1565c0;color:#1565c0" onclick="confirmarChecagemPipeline('${l.subId}')">✔ Conferido</button>
+          <button class="dash-row-btn" style="border-color:#c62828;color:#c62828" onclick="abrirRetirarProspeccao('${l.subId}')">↩️ Fora do pipeline</button>
+        </td>
+      </tr>`;
+  }).join('');
+  return cards + `
+    <table class="dash-table">
+      <thead><tr><th>Composição</th><th>Bairro</th><th>Enviado ao pipeline</th><th>Última checagem</th><th>Situação</th><th></th></tr></thead>
+      <tbody>${linhasHtml}</tbody>
+    </table>`;
+}
+function abrirChecagemPipeline(){
+  document.getElementById('pipeline-conteudo').innerHTML = construirChecagemPipeline();
+  document.getElementById('pipeline-overlay').classList.add('on');
+  atualizarChecagemPipelineSeAberta();
+}
+function fecharChecagemPipeline(){ document.getElementById('pipeline-overlay').classList.remove('on'); }
+// Atualiza a bolinha vermelha do botão (sempre) e a janela (se estiver aberta)
+function atualizarChecagemPipelineSeAberta(){
+  const n = contarChecagensPendentesPipeline();
+  const badge = document.getElementById('pipeline-badge-count');
+  if (badge) { badge.textContent = n; badge.classList.toggle('show', n > 0); }
+  const ov = document.getElementById('pipeline-overlay');
+  if (ov && ov.classList.contains('on')) document.getElementById('pipeline-conteudo').innerHTML = construirChecagemPipeline();
+}
+function avisarChecagemPipelineVencida(){
+  atualizarChecagemPipelineSeAberta();
+  const n = contarChecagensPendentesPipeline();
+  if (n > 0) mostrarToast(`🔄 ${n} área${n===1?'':'s'} no pipeline com checagem de ${DIAS_CHECAGEM_PIPELINE} dias pendente — veja em "Checagem do pipeline".`, 10000);
+}
+// Lista pra conferir lado a lado com o sistema da Kamila
+function exportarChecagemPipeline(){
+  const linhas = listaChecagemPipeline();
+  if (!linhas.length) { mostrarToast('Nenhuma área no pipeline pra exportar.'); return; }
+  const cel = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const csv = ['Composição','Vinculadas','Bairro','Corretor','Área (m²)','Enviado ao pipeline em','Última checagem','Dias desde a última checagem','Situação']
+    .map(cel).join(';') + '\n' + linhas.map(l => [
+      l.subId, l.extras, l.bairro, l.corretor, Math.round(l.area), dataCurtaBR(l.dataEnvio),
+      l.chk.checou ? dataCurtaBR(l.chk.base) : '', l.chk.dias ?? '', l.chk.vencida ? 'Checagem pendente' : 'Em dia',
+    ].map(cel).join(';')).join('\n');
+  const blob = new Blob(['\ufeff' + csv], {type: 'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `checagem_pipeline_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
 async function adicionarHistoricoComposicao(subId, texto, lote, dataCustom){
   const entrada = { data: dataCustom || new Date().toISOString(), texto, lote: lote || null };
   // otimista: já aparece na lista antes da confirmação do Firebase
@@ -4861,18 +5045,29 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal, bairro){
   const histSubId = PROSPECCAO_HISTORICO_CACHE[subId] || [];
   const histQidReal = (subId !== qidReal) ? (PROSPECCAO_HISTORICO_CACHE[qidReal] || []) : [];
   const hist = [...histSubId, ...histQidReal].sort((a,b)=> new Date(b.data) - new Date(a.data));
-  const dias = diasDesde(ultimaAtualizacaoProspeccao(subId));
+  const chk = status ? statusChecagemPipeline(status) : null;
   const descarteGrupo = DESCARTE_STATUS_CACHE[qidReal]; // só existe se for escopo 'composicao'; usa o id completo (com sufixo), não a quadra fiscal base
 
   const statusHtml = status ? `
     <div class="hist-box" style="border-color:#1565c0;background:#eef4fc">
       <span class="badge-prospeccao">📧 No pipeline${statusCobreTudo?'':' (parcial)'}</span>
       ${statusCobreTudo?'':`<div style="font-size:10px;color:#8a6d1a;margin-top:4px">Só ${status.lotes.length} de ${lotes.length} lotes desta composição continuam na prospecção — os demais foram retirados manualmente e não aparecem mais em azul no mapa.</div>`}
-      <div style="font-size:11px;color:#555;margin-top:6px">
-        Com <strong>${escapeHtmlHistorico(status.corretor)}</strong> desde ${formatarDataHistorico(status.dataEnvio)}
-        ${dias!==null?` · última atualização há ${dias} dia${dias===1?'':'s'}`:''}
-        ${dias!==null && dias>DIAS_ALERTA_PROSPECCAO ? '<span class="dash-alerta-pill" style="margin-left:6px">⚠️ Sem retorno</span>' : ''}
+      <div style="font-size:11px;color:#555;margin-top:6px;line-height:1.6">
+        Com <strong>${escapeHtmlHistorico(status.corretor)}</strong> · enviado ao pipeline em <strong>${dataCurtaBR(status.dataEnvio)}</strong><br>
+        Última checagem: ${chk.checou ? dataCurtaBR(chk.base) : 'ainda não houve (vale a data do envio)'}
+        ${chk.vencida
+          ? `<span class="dash-alerta-pill" style="margin-left:6px">⚠️ Checagem pendente${chk.dias!==null?` · ${chk.dias} dias`:''}</span>`
+          : ` · próxima em <strong>${dataCurtaBR(chk.proxima)}</strong> (${chk.diasRestantes} dia${chk.diasRestantes===1?'':'s'})`}
       </div>
+      ${chk.vencida ? `
+      <div class="pipe-aviso">
+        <strong>Checagem de ${DIAS_CHECAGEM_PIPELINE} dias pendente.</strong> Confira no pipeline (sistema da Kamila) se esta área segue ativa por lá — assim os dois sistemas não divergem (ex.: descartada em um e ativa no outro).
+        <div class="acoes">
+          <button onclick="confirmarChecagemPipeline('${subId}')" style="background:#1565c0;color:#fff;border-color:#1565c0">✔ Conferi — segue ativa no pipeline</button>
+          <button onclick="abrirRetirarProspeccao('${subId}')">↩️ Não está mais no pipeline</button>
+        </div>
+      </div>` : `
+      <button class="btn-retirar-prosp" style="border-color:#1565c0;color:#1565c0" onclick="confirmarChecagemPipeline('${subId}')">✔ Registrar checagem agora</button>`}
       <button class="btn-retirar-prosp" onclick="abrirRetirarProspeccao('${subId}')">↩️ Retirar do status de prospecção</button>
     </div>` : '';
 
@@ -4911,11 +5106,6 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal, bairro){
       <span class="hist-data">${formatarDataHistorico(h.data)}</span>${escapeHtmlHistorico(h.texto)}${h.lote?` <span class="hist-lote">${h.lote}</span>`:''}
     </div>`).join('') : '<div style="font-size:11px;color:#aaa">Nenhum registro ainda.</div>';
 
-  const opcoesLotes = lotes.map(l => {
-    const sql = `${qidBase}.${l}`;
-    return `<option value="${sql}">${sql}</option>`;
-  }).join('');
-
   return `
     <div class="dp-sec">
       <div class="dp-st">Histórico da composição</div>
@@ -4924,40 +5114,7 @@ function htmlSecaoHistorico(subId, lotes, qidBase, qidReal, bairro){
       ${descarteHtml}
       ${restricaoComposicaoHtml}
       <div class="hist-box">${listaHtml}</div>
-      <div class="hist-form">
-        <textarea id="hist-novo-${qidReal.replace(/[.~]/g,'-')}" placeholder="Registrar uma atualização (negociação, visita, retorno do corretor...)"></textarea>
-        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          <label style="font-size:10.5px;color:#888;display:flex;align-items:center;gap:4px">Quando:
-            <input type="datetime-local" id="hist-quando-${qidReal.replace(/[.~]/g,'-')}" style="font-size:11px;padding:2px 4px" value="${new Date(Date.now() - new Date().getTimezoneOffset()*60000).toISOString().slice(0,16)}">
-          </label>
-          <select id="hist-lote-${qidReal.replace(/[.~]/g,'-')}" style="flex:1">
-            <option value="">Sem lote específico</option>
-            ${opcoesLotes}
-          </select>
-          <button onclick="salvarHistoricoManualUI('${qidReal}')">+ Adicionar</button>
-        </div>
-      </div>
     </div>`;
-}
-
-async function salvarHistoricoManualUI(qidBase){
-  const safeId = qidBase.replace(/[.~]/g,'-');
-  const textoEl = document.getElementById('hist-novo-'+safeId);
-  const loteEl = document.getElementById('hist-lote-'+safeId);
-  const quandoEl = document.getElementById('hist-quando-'+safeId);
-  const texto = textoEl.value.trim();
-  if (!texto) { mostrarToast('Escreva algo antes de adicionar ao histórico.'); return; }
-  // O campo datetime-local não tem fuso — interpretamos como horário LOCAL
-  // do navegador (o normal pra quem está digitando aqui em SP) e convertemos
-  // pro ISO/UTC de verdade, que é o que o resto do sistema espera.
-  let dataCustom = null;
-  if (quandoEl && quandoEl.value) {
-    const d = new Date(quandoEl.value);
-    if (!isNaN(d.getTime())) dataCustom = d.toISOString();
-  }
-  await adicionarHistoricoComposicao(qidBase, texto, loteEl.value || null, dataCustom);
-  if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
-  mostrarToast('Histórico atualizado!');
 }
 
 // ── Retirar do status de prospecção (exige motivo, fica registrado) ──
@@ -4981,6 +5138,7 @@ async function confirmarRetiradaProspeccao(){
   renderQuadraMarkers(); renderQuadraList();
   if (selectedSubId===subId) selectQuadra(selectedQid, selectedSubId, true);
   mostrarToast('Composição retirada do status de prospecção.');
+  atualizarChecagemPipelineSeAberta();
 }
 
 function atualizarIndicadorSync(estado) {
@@ -9269,6 +9427,7 @@ function fecharDashboardProspeccao(){
   document.getElementById('dash-overlay').classList.remove('on');
 }
 function atualizarDashboardProspeccaoSeAberto(){
+  atualizarChecagemPipelineSeAberta();
   if (document.getElementById('dash-overlay').classList.contains('on')) {
     document.getElementById('dash-conteudo').innerHTML = construirDashboardProspeccao();
   }
@@ -9435,7 +9594,8 @@ function iniciarApp(){
     _bootConcluido = true;
     _perfMarcar('abertura concluída — mapa liberado');
     perfAbertura();
-    setTimeout(perfAbertura, 40000);   // de novo 40s depois, pra incluir respostas que chegaram atrasadas
+    setTimeout(perfAbertura, 40000);
+    setTimeout(avisarChecagemPipelineVencida, 2500);   // dá tempo do estado de prospecção chegar antes de contar   // de novo 40s depois, pra incluir respostas que chegaram atrasadas
   }).catch(() => {
     loadPerimetrosLayer();
     atualizarContadorRegioes();
