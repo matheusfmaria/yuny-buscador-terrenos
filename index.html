@@ -2757,6 +2757,15 @@ async function carregarDistrito(nomeDistrito, opcoes={}){
 // são a fatia (0-1) da barra de progresso geral reservada pra essa etapa;
 // atualizarProgresso é _definirProgressoCarga (ou equivalente).
 async function _filtrarERenderizarEmLotes(progressoDe, progressoAte, atualizarProgresso){
+  // O filtro de área/score/VGV de uma composição VINCULADA usa o total
+  // combinado do vínculo (subPassaFiltrosNumericos -> _statsVinculoPreCalc).
+  // Esse cache PRECISA estar montado ANTES de filtrar — applyQFilters já fazia
+  // isso, mas este caminho (abertura, "exibir todos os bairros" e atualização
+  // vinda do servidor) não: filtrava com o cache vazio e avaliava cada parte
+  // vinculada isolada, então uma composição de 2.055 m² formada por partes de
+  // 1.269 + 786 m² sumia com o filtro padrão de 1.500 m² e só reaparecia
+  // depois que alguém mexia em qualquer filtro (bug da quadra 016.089).
+  _recalcularCachesVinculo();
   const hideOU=document.getElementById('q-hide-ou')?.checked||false;
   visibleQuadras=QUADRAS.filter(q=>{
     if(qfilters.bairro!=='Todos'&&q.bairro!==qfilters.bairro) return false;
