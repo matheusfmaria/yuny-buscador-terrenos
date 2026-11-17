@@ -605,6 +605,17 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
           <input type="number" id="qf-camax-max" placeholder="Máx" step="0.1" inputmode="decimal" oninput="atualizarFiltroNumerico()">
         </div>
         <div style="font-size:9.5px;color:#aaa;margin:-2px 0 6px;line-height:1.4">Zona com CA máx. 1 não tem potencial de incorporação. Áreas em Operação Urbana contam como 4,0 (regra própria, não segue o zoneamento).</div>
+        <div id="bloco-mcmv-filtros" style="display:none;border:1px solid #c8e6c9;background:#f4faf4;border-radius:6px;padding:6px 8px;margin:6px 0">
+          <div class="fl" style="margin-top:0;color:#1b5e20">Econômico · MCMV</div>
+          <div class="fl">Máx. de lotes na composição</div>
+          <div class="minmax-row"><input type="number" id="qf-nlotes-max" min="1" step="1" placeholder="Máx" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
+          <div class="fl">Distância máx. da estação mais próxima (m)</div>
+          <div class="minmax-row"><input type="number" id="qf-est-raio" min="0" step="50" placeholder="Raio (m)" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
+          <label class="check-row"><input type="radio" name="qf-est-modo" value="todos" checked onchange="atualizarFiltroNumerico()"> Trem e metrô</label>
+          <label class="check-row"><input type="radio" name="qf-est-modo" value="metro" onchange="atualizarFiltroNumerico()"> Apenas metrô</label>
+          <label class="check-row"><input type="checkbox" id="qf-est-futuras" onchange="atualizarFiltroNumerico()"> Considerar estações com inauguração a partir de 2030?</label>
+          <div style="font-size:9.5px;color:#888;line-height:1.4">Por padrão contam só estações existentes e com previsão até 2030. Deixe o raio em branco para não filtrar por estação.</div>
+        </div>
         <div class="fl">Valor de mercado (R$/m²)</div>
         <div class="minmax-row">
           <input type="number" id="qf-preco-min" placeholder="Mín" inputmode="numeric" oninput="atualizarFiltroNumerico()">
@@ -2729,7 +2740,7 @@ async function carregarDistrito(nomeDistrito, opcoes={}){
     }
 
     // invalida caches que dependiam do conjunto de dados anterior
-    _avalScoreCache.clear();
+    _avalScoreCache.clear(); _mcmvTerrenoCache.clear();
     if (typeof _AVAL_RECENTES_CACHE !== 'undefined') _AVAL_RECENTES_CACHE = null;
     if (typeof _AVAL_GRADE !== 'undefined') _AVAL_GRADE = null;
 
@@ -2785,8 +2796,8 @@ async function _filtrarERenderizarEmLotes(progressoDe, progressoAte, atualizarPr
     if (atualizarProgresso) atualizarProgresso(progressoDe + (pct/100)*(progressoAte-progressoDe), `Desenhando o mapa… ${pct}%`);
   });
 }
-async function carregarTodosOsBairros(){
-  const faltando = DISTRITOS_DISPONIVEIS.filter(d => !regioesCarregadas.has(d.distrito));
+async function carregarTodosOsBairros(apenas){
+  const faltando = DISTRITOS_DISPONIVEIS.filter(d => !regioesCarregadas.has(d.distrito) && (!Array.isArray(apenas) || apenas.includes(d.distrito)));
   if (!faltando.length) { mostrarToast('Todos os bairros já estão carregados.'); return; }
 
   document.getElementById('carga-overlay').style.display = 'flex';
@@ -3162,6 +3173,7 @@ let qfilters={
   vgvMin:0, vgvMax:Infinity,       // em R$ milhões
   precoMin:0, precoMax:Infinity,   // R$/m²
   caMin:0, caMax:Infinity,
+  nLotesMax:Infinity, estRaio:Infinity, estModo:'todos', estFuturas:false, // só valem no perfil MCMV
   caMaxZonaMin:2, caMaxZonaMax:Infinity,  // CA máx do zoneamento: padrão 2 (abaixo disso não há potencial de incorporação)
 };
 // Lê os 10 campos de min/máx de uma vez e reaplica os filtros — com um
@@ -3186,8 +3198,16 @@ function atualizarFiltroNumerico(){
     qfilters.caMax    = num('qf-ca-max', Infinity);
     qfilters.caMaxZonaMin = num('qf-camax-min', 0);
     qfilters.caMaxZonaMax = num('qf-camax-max', Infinity);
+    _lerFiltrosMcmv();
     applyQFilters();
   }, 350);
+}
+function _lerFiltrosMcmv(){
+  const num = (id, padrao) => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? padrao : v; };
+  qfilters.nLotesMax = num('qf-nlotes-max', Infinity);
+  qfilters.estRaio = num('qf-est-raio', Infinity);
+  qfilters.estModo = document.querySelector('input[name="qf-est-modo"]:checked')?.value || 'todos';
+  qfilters.estFuturas = !!document.getElementById('qf-est-futuras')?.checked;
 }
 let selectedSql=null, selectedQid=null, selectedSubId=null, selectedBairro=null, visibleLotes=[], visibleQuadras=[];
 
@@ -6748,6 +6768,7 @@ function subPassaFiltrosNumericos(q, sub) {
   // Urbana não segue o zoneamento e entra como 4,0 (ver caMaximoAplicavel).
   const caMaxZona = caMaximoAplicavel(zonaSub, q.ou);
   if (caMaxZona < qfilters.caMaxZonaMin || caMaxZona > qfilters.caMaxZonaMax) return false;
+  if (currentProfile === 'compacto' && TRANSPORTE && !subPassaFiltrosMcmv(q, sub)) return false;
   // CA utilizado: só calcula se algum limite foi de fato preenchido,
   // pra não gastar tempo com isso em toda quadra do mapa sem necessidade
   if (qfilters.caMin > 0 || qfilters.caMax < Infinity) {
@@ -6788,7 +6809,7 @@ function applyQFilters() {
 // ═══════════════════════════════════════════════════════════════════════
 let TESE_MCMV = null, TRANSPORTE = null, _mcmvCarregando = null;
 const TETO_HIS2 = 383636.74;
-const _teseCache = new Map(), _estGrade = new Map(), _mcmvTerrenoCache = new Map();
+const _teseCache = new Map(), _estGrade = new Map(), _estGradeTodas = new Map(), _mcmvTerrenoCache = new Map(), _centroRapidoCache = new Map();
 async function carregarDadosMcmv(){
   if (TESE_MCMV && TRANSPORTE) return true;
   if (_mcmvCarregando) return _mcmvCarregando;
@@ -6799,11 +6820,12 @@ async function carregarDadosMcmv(){
         fetchComCache('pacotes_extra/transporte.json', 60000, 4000)]);
       if (!t || !tr) return false;
       TESE_MCMV = t; TRANSPORTE = tr;
-      _teseCache.clear(); _estGrade.clear(); _mcmvTerrenoCache.clear();
+      _teseCache.clear(); _estGrade.clear(); _estGradeTodas.clear(); _mcmvTerrenoCache.clear();
       tr.estacoes.forEach((e,i)=>{
-        if (e[5] === 'F') return; // sem prazo ≤ 2030 não conta como atrativo
         const k = Math.floor(e[0]/0.01)+','+Math.floor(e[1]/0.01);
-        let b = _estGrade.get(k); if (!b) { b=[]; _estGrade.set(k,b); } b.push(i);
+        let b = _estGradeTodas.get(k); if (!b) { b=[]; _estGradeTodas.set(k,b); } b.push(i);
+        if (e[5] === 'F') return; // sem prazo ≤ 2030 não conta como atrativo no score
+        b = _estGrade.get(k); if (!b) { b=[]; _estGrade.set(k,b); } b.push(i);
       });
       return true;
     } catch(err) { console.warn('Dados MCMV indisponíveis:', err); return false; }
@@ -6832,7 +6854,11 @@ function teseDoPonto(lat, lon){
   return r;
 }
 // Atrativo de estação: existente/aberta = "enorme"; prevista até 2030 = "grande"
-const EST_PTS = {E:[[600,25],[1000,20],[1500,12]], G:[[600,18],[1000,14],[1500,8]]};
+// Metrô vale mais que trem (pedido do Matheus): trem pontua ~80% do metrô
+const EST_PTS = {
+  metro:{E:[[600,25],[1000,20],[1500,12]], G:[[600,18],[1000,14],[1500,8]]},
+  trem: {E:[[600,20],[1000,16],[1500,10]], G:[[600,14],[1000,11],[1500,6]]},
+};
 function estacaoAtrativa(lat, lon){
   if (!TRANSPORTE) return null;
   const gx=Math.floor(lat/0.01), gy=Math.floor(lon/0.01);
@@ -6842,7 +6868,7 @@ function estacaoAtrativa(lat, lon){
     b.forEach(i=>{
       const e=TRANSPORTE.estacoes[i];
       const m=_kmEntre(lat,lon,e[0],e[1])*1000;
-      const faixa=(EST_PTS[e[5]]||[]).find(f=>m<=f[0]); if(!faixa) return;
+      const faixa=((EST_PTS[e[4]]||EST_PTS.trem)[e[5]]||[]).find(f=>m<=f[0]); if(!faixa) return;
       if (!best || faixa[1]>best.pts || (faixa[1]===best.pts && m<best.m)) best={pts:faixa[1], m:Math.round(m), nome:e[2], linha:e[3], modo:e[4], classe:e[5], prazo:e[6]};
     });
   }
@@ -6869,9 +6895,82 @@ function incidenciaTerrenoMcmv(q, area, lotes, tese){
   _mcmvTerrenoCache.set(chave, r);
   return r;
 }
+
+// Centro da composição sem Turf (média dos centros dos lotes) — barato o bastante
+// para rodar em todo filtro; usado na distância até a estação (score e filtro).
+function centroRapidoSub(q, lotes){
+  const qb = q.id.split('-')[0];
+  const chave = qb+'|'+(lotes||[]).join(',');
+  let c = _centroRapidoCache.get(chave);
+  if (c) return c;
+  let sy=0, sx=0, k=0;
+  (lotes||[]).slice(0,12).forEach(l=>{
+    const ring = LOTES_GEOM[qb+'.'+l]; if(!ring || !ring.length) return;
+    let a=Infinity,b=-Infinity,d=Infinity,e=-Infinity;
+    ring.forEach(p=>{ if(p[0]<a)a=p[0]; if(p[0]>b)b=p[0]; if(p[1]<d)d=p[1]; if(p[1]>e)e=p[1]; });
+    sx+=(a+b)/2; sy+=(d+e)/2; k++;
+  });
+  c = k ? {lat:sy/k, lon:sx/k} : {lat:q.lat, lon:q.lon};
+  _centroRapidoCache.set(chave, c);
+  return c;
+}
+// Distância (m) até a estação mais próxima que atende ao filtro: modo 'todos' | 'metro';
+// incluirFuturas = considerar também estações sem previsão até 2030
+function distEstacaoFiltro(lat, lon, modo, incluirFuturas, raioMax){
+  const n = Math.max(1, Math.ceil(raioMax/1000)+1);
+  const gx=Math.floor(lat/0.01), gy=Math.floor(lon/0.01);
+  let best = Infinity;
+  for (let dx=-n; dx<=n; dx++) for (let dy=-n; dy<=n; dy++) {
+    const b = _estGradeTodas.get((gx+dx)+','+(gy+dy)); if(!b) continue;
+    for (const i of b) {
+      const e = TRANSPORTE.estacoes[i];
+      if (modo==='metro' && e[4]!=='metro') continue;
+      if (e[5]==='F' && !incluirFuturas) continue;
+      const m = _kmEntre(lat,lon,e[0],e[1])*1000;
+      if (m<best) best=m;
+    }
+  }
+  return best;
+}
+function subPassaFiltrosMcmv(q, sub){
+  if (sub.n > qfilters.nLotesMax) return false;
+  if (qfilters.estRaio < Infinity) {
+    const c = centroRapidoSub(q, sub.lotes);
+    if (distEstacaoFiltro(c.lat, c.lon, qfilters.estModo, qfilters.estFuturas, qfilters.estRaio) > qfilters.estRaio) return false;
+  }
+  return true;
+}
+// Distritos habilitados por padrão no perfil MCMV (lista do Matheus, 17/11/2026)
+const MCMV_DISTRITOS_NOMES = ['Vila Leopoldina','Lapa','Pirituba','Jaraguá','Barra Funda','Freguesia do Ó','Santa Cecília','República','Bom Retiro','Santana','Tucuruvi','Jabaquara','Campo Grande','Vila Andrade','Jardim São Luís','Campo Limpo','Capão Redondo','Cidade Dutra','Grajaú','Parelheiros','Ipiranga','Cursino','Vila Prudente','São Lucas','Água Rasa','Sapopemba','São Mateus','Butantã','Morumbi','Vila Sônia','Jaguaré','Perus','Liberdade','Sé','Brás','Cambuci','Mooca','Belém','Tatuapé','Carrão','Penha','Vila Matilde','Artur Alvim','Itaquera','José Bonifácio','Guaianases','Lajeado','Cangaíba','Ermelino Matarazzo','São Miguel','Jardim Helena','Vila Curuçá','Itaim Paulista','Jardim Ângela','Iguatemi','Vila Formosa','Brasilândia','São Rafael'];
+function _semAcento(s){ return s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[_-]/g,' ').trim(); }
+function distritosMcmv(){
+  const alvo = new Set(MCMV_DISTRITOS_NOMES.map(_semAcento));
+  return DISTRITOS_DISPONIVEIS.filter(d => alvo.has(_semAcento(d.distrito))).map(d=>d.distrito);
+}
+let _mcmvCamaxAlto = null;
+// Liga/desliga os padrões exclusivos do perfil MCMV (e restaura os do Alto padrão)
+function aplicarPadroesMcmv(ligar){
+  const bloco = document.getElementById('bloco-mcmv-filtros');
+  if (bloco) bloco.style.display = ligar ? 'block' : 'none';
+  const caMin = document.getElementById('qf-camax-min');
+  const set = (id,v)=>{ const el=document.getElementById(id); if(el) el.value=v; };
+  if (ligar) {
+    if (_mcmvCamaxAlto === null && caMin) _mcmvCamaxAlto = caMin.value;
+    set('qf-camax-min','4'); set('qf-nlotes-max','1'); set('qf-est-raio','500');
+    const r=document.querySelector('input[name="qf-est-modo"][value="todos"]'); if(r) r.checked=true;
+    const f=document.getElementById('qf-est-futuras'); if(f) f.checked=false;
+  } else if (_mcmvCamaxAlto !== null && caMin) {
+    caMin.value = _mcmvCamaxAlto; _mcmvCamaxAlto = null;
+    qfilters.caMaxZonaMin = parseFloat(caMin.value)||0;
+  }
+  const num=(id,d)=>{const v=parseFloat(document.getElementById(id)?.value);return isNaN(v)?d:v;};
+  if (ligar) qfilters.caMaxZonaMin = num('qf-camax-min',0);
+  _lerFiltrosMcmv();
+}
 function scoreMcmvDetalhe(q, area, n, lotes){
-  const tese = teseDoPonto(q.lat, q.lon);
-  const est = estacaoAtrativa(q.lat, q.lon);
+  const ce = centroRapidoSub(q, lotes);
+  const tese = teseDoPonto(ce.lat, ce.lon);
+  const est = estacaoAtrativa(ce.lat, ce.lon);
   const classePts = {PRIORITARIO:20, SELETIVO:14, SEM_DADO:5, EVITAR:0}[tese?tese.classe:'SEM_DADO'] ?? 5;
   const merc = Math.min(30, classePts + (tese && tese.score ? Math.round(tese.score/10) : 0));
   const zon = ZONA_MCMV[q.zona] || 0;
@@ -6891,7 +6990,7 @@ function htmlScoreMcmv(q, stats){
   const t = d.tese || {classe:'SEM_DADO'};
   const cor = {PRIORITARIO:'#2e7d32',SELETIVO:'#f9a825',EVITAR:'#c62828',SEM_DADO:'#757575'}[t.classe];
   const fm = v=>v==null?'—':Math.round(v).toLocaleString('pt-BR');
-  const estTxt = d.est && d.est.pts ? `${d.est.classe==='E'?'🚇 Enorme atrativo':'🚧 Grande atrativo'} — ${d.est.nome} (${d.est.linha}), ${d.est.m} m · ${d.est.prazo}` : 'Nenhuma estação existente ou prevista até 2030 em 1,5 km';
+  const estTxt = d.est && d.est.pts ? `${d.est.classe==='E'?'🚇 Enorme atrativo':'🚧 Grande atrativo'} · ${d.est.modo==='metro'?'metrô':'trem'} — ${d.est.nome} (${d.est.linha}), ${d.est.m} m · ${d.est.prazo}` : 'Nenhuma estação existente ou prevista até 2030 em 1,5 km';
   const comp = (TESE_MCMV.comparaveis||[]).map(c=>({c, km:_kmEntre(q.lat,q.lon,c[0],c[1])})).filter(x=>x.km<=1.5).sort((a,b)=>a.km-b.km).slice(0,5);
   const teto = t.precoM2 ? Math.min(t.precoM2*36, TETO_HIS2) : null;
   const nTxt = stats.n===1?'1 lote (proprietário único, se confirmado)':stats.n+' lotes';
@@ -8296,12 +8395,17 @@ async function setProfile(p) {
     if (ce && !ce.checked) { ce.checked = true; layers.estacoes.addTo(map); }
   }
   currentProfile = p;
+  aplicarPadroesMcmv(p === 'compacto');
   limparCacheGetSubGroups();
   document.getElementById('profile-alto').classList.toggle('on', p==='alto');
   document.getElementById('profile-compacto').classList.toggle('on', p==='compacto');
   // Recalcula scores e reaplica filtros/render
   applyFilters();
   applyQFilters();
+  if (p === 'compacto') {
+    const pend = distritosMcmv().filter(d => !regioesCarregadas.has(d));
+    if (pend.length) await carregarTodosOsBairros(distritosMcmv());
+  }
 }
 
 // Janela de pontuação: platô central com decaimento linear nas bordas
