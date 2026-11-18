@@ -1456,15 +1456,15 @@ async function consultarViaExtensao(sqls){
   window.postMessage({ fonte: 'yuny-app', tipo: 'consultar', itens }, '*');
   return true;
 }
-async function consultarTodosProprietarios(lista){
-  const pend = (lista || []).filter(s => !nomeProprietario(s));
+async function consultarTodosProprietarios(lista, forcar){
+  const pend = forcar ? (lista || []).slice() : (lista || []).filter(s => !nomeProprietario(s));
   if (!pend.length) { mostrarToast('Todos os lotes já têm proprietário registrado.'); return; }
   if (!(await extPropDisponivel())) {
     mostrarInstrucoesExtensao(null);
     return;
   }
   if (_propAuto) { mostrarToast('Já existe uma consulta em andamento.'); return; }
-  if (pend.length > 30 && !confirm(`Consultar ${pend.length} lotes? Com 3 s entre consultas leva cerca de ${Math.ceil(pend.length * 8 / 60)} min.`)) return;
+  if (pend.length > 30 && !confirm(`${forcar?'Atualizar':'Consultar'} ${pend.length} lotes? Com 3 s entre consultas leva cerca de ${Math.ceil(pend.length * 8 / 60)} min.`)) return;
   await consultarViaExtensao(pend);
 }
 
@@ -6700,7 +6700,7 @@ function lotePopupHTML(sql, groupId) {
     </div>` : ''; })()}
     <div style="background:#f7f7f7;border-radius:5px;padding:6px 8px;margin-bottom:6px;font-size:11px;line-height:1.5">
       <div>👤 ${nomeProp
-        ? `<strong>${htmlNomeComData(sql)}</strong>`
+        ? `<strong>${htmlNomeComData(sql)}</strong> <button class="prop-btn" title="Consulta de novo no portal e sobrescreve o nome registrado" style="font-size:9.5px;padding:1px 6px" onclick="consultarProprietario('${sql}')">↻ Atualizar</button>`
         : `<span style="color:#90a4ae">não consultado</span> <button class="prop-btn" style="font-size:9.5px;padding:1px 6px" onclick="consultarProprietario('${sql}')">🔍 Consultar</button>`
       }</div>
       ${htmlNotaProprietarioDesatualizado(sql)}
@@ -8973,7 +8973,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       </div>` : ''}
     <div class="dp-sec">
       <div class="dp-st">Lotes contíguos${_stats.dividido?' desta parte':' do grupo'}${_combo?' — combinado c/ vínculo':''}</div>
-      ${(()=>{ const lista=(_combo ? _combo.gruposLotes.flatMap(g=>g.lotes.map(l=>g.qidBase+'.'+l)) : _stats.lotes.map(l=>q.id.split('-')[0]+'.'+l)); const pend=lista.filter(s=>!nomeProprietario(s)); return pend.length>1 ? `<div style="margin:2px 0 6px"><button class="prop-btn" style="font-size:10.5px;padding:3px 9px" onclick='consultarTodosProprietarios(${JSON.stringify(pend)})'>🔍 Consultar todos (${pend.length})</button></div>` : ''; })()}
+      ${(()=>{ const lista=(_combo ? _combo.gruposLotes.flatMap(g=>g.lotes.map(l=>g.qidBase+'.'+l)) : _stats.lotes.map(l=>q.id.split('-')[0]+'.'+l)); const pend=lista.filter(s=>!nomeProprietario(s)); const reg=lista.filter(s=>nomeProprietario(s)); const b1=pend.length>1 ? `<button class="prop-btn" style="font-size:10.5px;padding:3px 9px" onclick='consultarTodosProprietarios(${JSON.stringify(pend)})'>🔍 Consultar todos (${pend.length})</button>` : ''; const b2=reg.length>1 ? ` <button class="prop-btn" title="Consulta de novo no portal e sobrescreve os nomes registrados" style="font-size:10.5px;padding:3px 9px" onclick='consultarTodosProprietarios(${JSON.stringify(reg)}, true)'>↻ Atualizar todos (${reg.length})</button>` : ''; return (b1||b2) ? `<div style="margin:2px 0 6px">${b1}${b2}</div>` : ''; })()}
       <table style="width:100%;border-collapse:collapse;font-size:11px">
         <thead><tr>
           <th style="text-align:left;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">SQL</th>
@@ -8995,7 +8995,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
           return `<tr>
             <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2;font-family:monospace;white-space:nowrap">${sqlComDigito(sql)}</td>
             <td style="padding:3px 6px;border-bottom:1px solid #f2f2f2">${nome
-              ? htmlNomeComData(sql) + htmlNotaProprietarioDesatualizado(sql)
+              ? htmlNomeComData(sql) + htmlNotaProprietarioDesatualizado(sql) + ` <button class="prop-btn" title="Consulta de novo no portal e sobrescreve o nome registrado" style="font-size:9.5px;padding:1px 6px" onclick="consultarProprietario('${sql}')">↻ Atualizar</button>`
               : `<button class="prop-btn" style="font-size:10px;padding:2px 8px" onclick="consultarProprietario('${sql}')">🔍 Consultar</button>
                  <div class="prop-form" id="prop-form-${safe}" style="display:none;margin-top:4px">
                    <input id="prop-input-${safe}" placeholder="Cole o nome que apareceu no formulário">
