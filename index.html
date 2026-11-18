@@ -1263,7 +1263,13 @@ function sqlComDv(sql){
 // O formulário separa em 4 campos (setor/quadra/lote/dígito), então copio
 // só os números — é o que dá menos trabalho pra colar.
 async function consultarProprietario(sql){
-  if (!_propAuto && dvDoSql(sql) !== null && await extPropDisponivel()) { await consultarViaExtensao([sql]); return; }
+  if (!_propAuto && dvDoSql(sql) !== null) {
+    if (await extPropDisponivel()) { await consultarViaExtensao([sql]); return; }
+    if (!instrucoesExtensaoSilenciadas()) { mostrarInstrucoesExtensao(() => consultarProprietarioManual(sql)); return; }
+  }
+  return consultarProprietarioManual(sql);
+}
+async function consultarProprietarioManual(sql){
   const dv = dvDoSql(sql);
   const partes = sql.split('.');
   const texto = dv !== null ? `${partes[0]}${partes[1]}${partes[2]}${dv}` : `${partes[0]}${partes[1]}${partes[2]}`;
@@ -1340,7 +1346,7 @@ async function _tratarMsgExtProp(m){
   if (m.tipo === 'andamento') _barraPropAuto(`Consultando proprietários… ${m.indice}/${m.total} (${sqlComDigito(m.sql)})`, true);
   else if (m.tipo === 'resultado') {
     if (m.nome) { _propAuto.feitos++; await registrarProprietario(m.sql, m.nome, { auto: true }); }
-    else { _propAuto.falhas++; _propAuto.erros.push(`${sqlComDigito(m.sql)}: ${m.erro || 'não encontrado'}`); }
+    else { _propAuto.falhas++; _propAuto.erros.push({ sql: m.sql, motivo: m.erro || 'nome não encontrado', aviso: m.aviso || null }); }
   }
   else if (m.tipo === 'ocupado') mostrarToast('Já existe uma consulta em andamento. Aguarde terminar.');
   else if (m.tipo === 'fim') {
@@ -1349,15 +1355,103 @@ async function _tratarMsgExtProp(m){
     if (m.bloqueado) txt += ' Parei por 5 falhas seguidas — o portal pode estar limitando; tente de novo mais tarde.';
     else if (m.parado) txt += ' Consulta interrompida.';
     mostrarToast(txt, 7000);
-    if (a.erros.length) console.warn('Consulta automática — sem resultado:', a.erros);
+    const todas = a.erros.concat((a.semDv || []).map(s => ({ sql: s, motivo: 'sem_digito' })));
+    if (todas.length) { console.warn('Consulta automática — sem resultado:', todas); mostrarFalhasConsulta(todas, m.bloqueado ? 'A consulta parou por 5 falhas seguidas: o portal pode estar limitando acessos. Tente de novo mais tarde.' : ''); }
   }
 }
+// ── Janela com as instruções de instalação (quando a extensão não está instalada) ──
+const PASTA_EXT_ONEDRIVE = '\\Yuny Incorporadora Holding S.A\\YUNYGROUP - Novos Negócios\\BANCO DE DADOS DE TERRENOS\\TERRENOS\\App_Local_Para_Instalar\\yuny-proprietarios';
+function _copiarTextoExt(texto, btn){
+  const ok = () => { if (btn) { const t = btn.textContent; btn.textContent = 'Copiado ✓'; setTimeout(()=>btn.textContent = t, 1800); } };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(texto).then(ok, ()=>{});
+  else { const ta = document.createElement('textarea'); ta.value = texto; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); ok(); } catch(e) {} ta.remove(); }
+}
+function fecharInstrucoesExtensao(){ const m = document.getElementById('modal-ext-prop'); if (m) m.remove(); }
+function instrucoesExtensaoSilenciadas(){ try { return localStorage.getItem('yuny_ext_prop_silenciar') === '1'; } catch(e) { return false; } }
+// continuar = função chamada se a pessoa preferir seguir no modo manual (consulta de um lote)
+function mostrarInstrucoesExtensao(continuarManual){
+  fecharInstrucoesExtensao();
+  const edge = /Edg\//.test(navigator.userAgent);
+  const urlExt = edge ? 'edge://extensions' : 'chrome://extensions';
+  const caminhoVar = '%USERPROFILE%' + PASTA_EXT_ONEDRIVE;          // funciona em qualquer usuário
+  const caminhoExemplo = 'C:\\Users\\SEU.USUARIO' + PASTA_EXT_ONEDRIVE;
+  const wrap = document.createElement('div');
+  wrap.id = 'modal-ext-prop';
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px';
+  wrap.innerHTML = `
+    <div style="background:#fff;border-radius:10px;max-width:640px;width:100%;max-height:92vh;overflow:auto;padding:20px 22px;font-size:13px;line-height:1.55;color:#222;box-shadow:0 8px 30px rgba(0,0,0,.35)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+        <div style="font-size:16px;font-weight:700">Consulta automática de proprietários</div>
+        <button onclick="fecharInstrucoesExtensao()" style="border:0;background:none;font-size:18px;cursor:pointer;color:#666">✕</button>
+      </div>
+      <p style="margin:6px 0 10px">Para o botão <strong>Consultar</strong> buscar o nome do proprietário sozinho, este computador precisa da extensão <strong>Yuny · Consulta de proprietários</strong>. A instalação leva cerca de 2 minutos e é feita uma única vez.</p>
+      <ol style="padding-left:20px;margin:0 0 10px">
+        <li style="margin-bottom:8px">Abra uma nova aba e acesse <code style="background:#f1f1f1;padding:1px 5px;border-radius:3px">${urlExt}</code>
+          <button class="prop-btn" style="font-size:11px;padding:2px 8px;margin-left:4px" onclick="_copiarTextoExt('${urlExt}', this)">Copiar endereço</button>
+          <div style="color:#777;font-size:11.5px">O navegador não deixa esta página abrir esse endereço sozinha: copie, cole numa aba nova e dê Enter.</div></li>
+        <li style="margin-bottom:8px">Ligue o <strong>Modo do desenvolvedor</strong> ${edge ? '(menu à esquerda)' : '(canto superior direito)'}.</li>
+        <li style="margin-bottom:8px">Clique em <strong>${edge ? 'Carregar descompactada' : 'Carregar sem compactação'}</strong> e, na janela de pastas, cole o caminho abaixo na barra de endereço e dê Enter. Depois clique em <strong>Selecionar pasta</strong>.
+          <div style="margin-top:5px;background:#f5f7f5;border:1px solid #d8e2d8;border-radius:6px;padding:6px 8px;font-family:monospace;font-size:11px;word-break:break-all">${caminhoVar}</div>
+          <button class="prop-btn" style="font-size:11px;padding:2px 8px;margin-top:5px" onclick="_copiarTextoExt(${JSON.stringify(caminhoVar).replace(/"/g,'&quot;')}, this)">Copiar caminho</button>
+          <div style="color:#777;font-size:11.5px;margin-top:4px">O <code>%USERPROFILE%</code> troca sozinho pelo seu usuário (ex.: <code>${caminhoExemplo}</code>). A pasta escolhida é a que contém o arquivo <code>manifest.json</code>.</div></li>
+        <li style="margin-bottom:4px">Volte para o Buscador e clique em <strong>Recarregar a página</strong> (ou aperte Ctrl+F5).</li>
+      </ol>
+      <div style="background:#fff8e1;border:1px solid #ffe082;border-radius:6px;padding:7px 10px;font-size:12px;margin-bottom:12px">
+        <strong>Importante:</strong> a pasta fica no OneDrive e precisa estar <strong>disponível neste computador</strong>. Se aparecer uma nuvem ao lado dos arquivos, clique com o botão direito na pasta <em>yuny-proprietarios</em> e escolha <strong>Sempre manter neste dispositivo</strong> antes do passo 3. Não mova nem apague a pasta depois de instalar.
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="prop-btn" style="font-size:12px;padding:6px 12px;background:#1b5e20;color:#fff;border-color:#1b5e20" onclick="location.reload()">Já instalei — recarregar a página</button>
+        ${continuarManual ? `<button class="prop-btn" style="font-size:12px;padding:6px 12px" onclick="fecharInstrucoesExtensao();_continuarManualExtProp()">Agora não — consultar manualmente</button>` : `<button class="prop-btn" style="font-size:12px;padding:6px 12px" onclick="fecharInstrucoesExtensao()">Fechar</button>`}
+        <label style="font-size:11.5px;color:#666;margin-left:auto"><input type="checkbox" id="ext-prop-silenciar" onchange="try{localStorage.setItem('yuny_ext_prop_silenciar',this.checked?'1':'0')}catch(e){}"> Não mostrar de novo neste navegador</label>
+      </div>
+    </div>`;
+  window._continuarManualExtProp = continuarManual || null;
+  wrap.addEventListener('click', e => { if (e.target === wrap) fecharInstrucoesExtensao(); });
+  document.body.appendChild(wrap);
+}
+function _continuarManualExtProp(){ const f = window._continuarManualExtProp; window._continuarManualExtProp = null; if (f) f(); }
+
+// ── Janela com os lotes que não puderam ser consultados, e o motivo ──
+function _motivoAmigavel(motivo){
+  const m = (motivo || '').toLowerCase();
+  if (m.includes('sem_digito')) return 'O Buscador não tem o dígito verificador deste lote, e o portal exige o código completo.';
+  if (m.includes('não encontrado') || m.includes('nao encontrado')) return 'O portal abriu, mas não trouxe nome de proprietário para este lote (comum em unidades/vagas sem proprietário individual ou cadastro sem nome).';
+  if (m.includes('tempo esgotado')) return 'O portal demorou demais para responder.';
+  if (m.includes('400')) return 'O portal recusou a consulta (erro HTTP 400). Costuma ser passageiro — tente de novo em alguns minutos.';
+  if (m.includes('formulário') || m.includes('formulario') || m.includes('botão avançar')) return 'A página do portal não carregou como esperado (formulário ou botão "Avançar" não apareceu).';
+  if (m.includes('abrir o portal')) return 'Não consegui abrir o portal da Prefeitura. Verifique a conexão.';
+  return 'Motivo: ' + (motivo || 'desconhecido');
+}
+function fecharFalhasConsulta(){ const m = document.getElementById('modal-falhas-prop'); if (m) m.remove(); }
+function mostrarFalhasConsulta(falhas, resumo){
+  fecharFalhasConsulta();
+  const wrap = document.createElement('div');
+  wrap.id = 'modal-falhas-prop';
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100001;display:flex;align-items:center;justify-content:center;padding:16px';
+  const linhas = falhas.map(f => `<tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee;font-family:monospace;white-space:nowrap;vertical-align:top">${sqlComDigito(f.sql)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee">${escapeHtmlHistorico(_motivoAmigavel(f.motivo))}${f.aviso ? `<div style="margin-top:3px;color:#8a4b00">O portal respondeu: “${escapeHtmlHistorico(f.aviso)}”</div>` : ''}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top"><button class="prop-btn" style="font-size:10.5px;padding:2px 8px;white-space:nowrap" onclick="fecharFalhasConsulta();consultarProprietarioManual('${f.sql}')">Consultar manualmente</button></td>
+    </tr>`).join('');
+  wrap.innerHTML = `
+    <div style="background:#fff;border-radius:10px;max-width:700px;width:100%;max-height:90vh;overflow:auto;padding:18px 20px;font-size:12.5px;line-height:1.5;color:#222;box-shadow:0 8px 30px rgba(0,0,0,.35)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+        <div style="font-size:15px;font-weight:700">${falhas.length === 1 ? 'Um lote não pôde ser consultado' : falhas.length + ' lotes não puderam ser consultados'}</div>
+        <button onclick="fecharFalhasConsulta()" style="border:0;background:none;font-size:18px;cursor:pointer;color:#666">✕</button>
+      </div>
+      ${resumo ? `<p style="margin:4px 0 8px;color:#555">${resumo}</p>` : ''}
+      <table style="width:100%;border-collapse:collapse"><tbody>${linhas}</tbody></table>
+      <div style="margin-top:12px;text-align:right"><button class="prop-btn" style="font-size:12px;padding:6px 14px" onclick="fecharFalhasConsulta()">Fechar</button></div>
+    </div>`;
+  wrap.addEventListener('click', e => { if (e.target === wrap) fecharFalhasConsulta(); });
+  document.body.appendChild(wrap);
+}
+
 async function consultarViaExtensao(sqls){
   const itens = [], semDv = [];
   sqls.forEach(s => { const dv = dvDoSql(s); if (dv === null) semDv.push(s); else itens.push({ sql: s, codigo: s.replace(/\./g, '') + dv }); });
-  if (!itens.length) { mostrarToast('Esses lotes estão sem dígito verificador — use a consulta manual.', 6000); return false; }
-  if (semDv.length) mostrarToast(`${semDv.length} lote(s) sem dígito verificador ficam de fora (consulta manual).`, 6000);
-  _propAuto = { total: itens.length, feitos: 0, falhas: 0, erros: [] };
+  if (!itens.length) { mostrarFalhasConsulta(semDv.map(s => ({ sql: s, motivo: 'sem_digito' }))); return false; }
+  _propAuto = { total: itens.length, feitos: 0, falhas: 0, erros: [], semDv };
   _barraPropAuto(`Consultando proprietários… 0/${itens.length}`, true);
   window.postMessage({ fonte: 'yuny-app', tipo: 'consultar', itens }, '*');
   return true;
@@ -1366,7 +1460,7 @@ async function consultarTodosProprietarios(lista){
   const pend = (lista || []).filter(s => !nomeProprietario(s));
   if (!pend.length) { mostrarToast('Todos os lotes já têm proprietário registrado.'); return; }
   if (!(await extPropDisponivel())) {
-    mostrarToast('Extensão "Yuny · Consulta de proprietários" não encontrada neste navegador. Instale-a (ou recarregue a página) para consultar todos de uma vez.', 8000);
+    mostrarInstrucoesExtensao(null);
     return;
   }
   if (_propAuto) { mostrarToast('Já existe uma consulta em andamento.'); return; }
