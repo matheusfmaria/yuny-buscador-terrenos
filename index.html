@@ -607,6 +607,11 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
         <div style="font-size:9.5px;color:#aaa;margin:-2px 0 6px;line-height:1.4">Zona com CA máx. 1 não tem potencial de incorporação. Áreas em Operação Urbana contam como 4,0 (regra própria, não segue o zoneamento).</div>
         <div id="bloco-mcmv-filtros" style="display:none;border:1px solid #c8e6c9;background:#f4faf4;border-radius:6px;padding:6px 8px;margin:6px 0">
           <div class="fl" style="margin-top:0;color:#1b5e20">Econômico · MCMV</div>
+          <div class="fl">Mercado F3 2 dorm. (tese)</div>
+          <label class="check-row"><input type="checkbox" id="qf-merc-PRIORITARIO" checked onchange="atualizarFiltroNumerico()"> 🟩 Prioritário</label>
+          <label class="check-row"><input type="checkbox" id="qf-merc-SELETIVO" checked onchange="atualizarFiltroNumerico()"> 🟨 Seletivo</label>
+          <label class="check-row"><input type="checkbox" id="qf-merc-SEM_DADO" onchange="atualizarFiltroNumerico()"> ⬜ Sem dado</label>
+          <label class="check-row"><input type="checkbox" id="qf-merc-EVITAR" onchange="atualizarFiltroNumerico()"> 🟥 Evitar</label>
           <div class="fl">Máx. de lotes na composição</div>
           <div class="minmax-row"><input type="number" id="qf-nlotes-max" min="1" step="1" placeholder="Máx" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
           <div class="fl">Distância máx. da estação mais próxima (m)</div>
@@ -1258,6 +1263,7 @@ function sqlComDv(sql){
 // O formulário separa em 4 campos (setor/quadra/lote/dígito), então copio
 // só os números — é o que dá menos trabalho pra colar.
 async function consultarProprietario(sql){
+  if (!_propAuto && dvDoSql(sql) !== null && await extPropDisponivel()) { await consultarViaExtensao([sql]); return; }
   const dv = dvDoSql(sql);
   const partes = sql.split('.');
   const texto = dv !== null ? `${partes[0]}${partes[1]}${partes[2]}${dv}` : `${partes[0]}${partes[1]}${partes[2]}`;
@@ -1276,10 +1282,15 @@ async function salvarProprietario(sql){
   const input = document.getElementById('prop-input-' + safe);
   const nome = (input.value || '').trim();
   if (!nome) { mostrarToast('Cole o nome do proprietário antes de salvar.'); return; }
+  await registrarProprietario(sql, nome, {});
+}
+// Grava o nome (manual ou vindo da extensão) — mesmo caminho nos dois casos
+async function registrarProprietario(sql, nome, opcoes){
+  const auto = !!(opcoes && opcoes.auto);
   const reg = {
     nome,
     data: new Date().toISOString(),
-    por: (_usuarioAtual && (_usuarioAtual.displayName || _usuarioAtual.email)) || 'desconhecido',
+    por: ((_usuarioAtual && (_usuarioAtual.displayName || _usuarioAtual.email)) || 'desconhecido') + (auto ? ' (consulta automática)' : ''),
   };
   PROPRIETARIOS_CACHE[sql] = reg;   // otimista
   if (_fbAtivo) {
@@ -1290,8 +1301,79 @@ async function salvarProprietario(sql){
   const loteNum = sql.split('.')[2];
   await adicionarHistoricoComposicao(composicaoDoLote(qidBase, loteNum), `Proprietário do lote ${sql} registrado: ${nome}`, sql);
   if (selectedQid) selectQuadra(selectedQid, selectedSubId, true);
-  mostrarToast('Proprietário salvo — agora vale para todo o time.');
+  if (!auto) mostrarToast('Proprietário salvo — agora vale para todo o time.');
 }
+// ── Consulta automática de proprietários via extensão de navegador ──────────
+// A extensão "Yuny · Consulta de proprietários" abre o portal da Prefeitura numa
+// aba em segundo plano, lê o nome e devolve para cá. Sem a extensão, tudo
+// continua como antes (copia o SQL e abre o formulário).
+let EXT_PROP = { disponivel: false, versao: null };
+let _propAuto = null;
+window.addEventListener('message', (e) => {
+  if (e.source !== window || !e.data || e.data.fonte !== 'yuny-ext') return;
+  _tratarMsgExtProp(e.data);
+});
+function _pingExtProp(){ window.postMessage({ fonte: 'yuny-app', tipo: 'ping' }, '*'); }
+async function extPropDisponivel(){
+  if (EXT_PROP.disponivel) return true;
+  _pingExtProp();
+  await new Promise(r => setTimeout(r, 350));
+  return EXT_PROP.disponivel;
+}
+function _barraPropAuto(texto, mostrarParar){
+  let el = document.getElementById('prop-auto-bar');
+  if (!texto) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div'); el.id = 'prop-auto-bar';
+    el.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:99999;background:#1a2e1a;color:#fff;padding:9px 14px;border-radius:8px;font-size:12px;display:flex;gap:10px;align-items:center;box-shadow:0 2px 10px rgba(0,0,0,.3)';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `<span>${texto}</span>` + (mostrarParar ? `<button style="background:#c62828;color:#fff;border:0;border-radius:4px;padding:3px 9px;cursor:pointer;font-size:11px" onclick="pararConsultaProprietarios()">Parar</button>` : '');
+}
+function pararConsultaProprietarios(){
+  window.postMessage({ fonte: 'yuny-app', tipo: 'parar' }, '*');
+  _barraPropAuto('Parando depois do lote atual…', false);
+}
+async function _tratarMsgExtProp(m){
+  if (m.tipo === 'pong') { EXT_PROP = { disponivel: true, versao: m.versao }; return; }
+  if (!_propAuto) return;
+  if (m.tipo === 'andamento') _barraPropAuto(`Consultando proprietários… ${m.indice}/${m.total} (${sqlComDigito(m.sql)})`, true);
+  else if (m.tipo === 'resultado') {
+    if (m.nome) { _propAuto.feitos++; await registrarProprietario(m.sql, m.nome, { auto: true }); }
+    else { _propAuto.falhas++; _propAuto.erros.push(`${sqlComDigito(m.sql)}: ${m.erro || 'não encontrado'}`); }
+  }
+  else if (m.tipo === 'ocupado') mostrarToast('Já existe uma consulta em andamento. Aguarde terminar.');
+  else if (m.tipo === 'fim') {
+    const a = _propAuto; _propAuto = null; _barraPropAuto(null);
+    let txt = `${a.feitos} proprietário(s) registrado(s)` + (a.falhas ? `, ${a.falhas} sem resultado` : '') + '.';
+    if (m.bloqueado) txt += ' Parei por 5 falhas seguidas — o portal pode estar limitando; tente de novo mais tarde.';
+    else if (m.parado) txt += ' Consulta interrompida.';
+    mostrarToast(txt, 7000);
+    if (a.erros.length) console.warn('Consulta automática — sem resultado:', a.erros);
+  }
+}
+async function consultarViaExtensao(sqls){
+  const itens = [], semDv = [];
+  sqls.forEach(s => { const dv = dvDoSql(s); if (dv === null) semDv.push(s); else itens.push({ sql: s, codigo: s.replace(/\./g, '') + dv }); });
+  if (!itens.length) { mostrarToast('Esses lotes estão sem dígito verificador — use a consulta manual.', 6000); return false; }
+  if (semDv.length) mostrarToast(`${semDv.length} lote(s) sem dígito verificador ficam de fora (consulta manual).`, 6000);
+  _propAuto = { total: itens.length, feitos: 0, falhas: 0, erros: [] };
+  _barraPropAuto(`Consultando proprietários… 0/${itens.length}`, true);
+  window.postMessage({ fonte: 'yuny-app', tipo: 'consultar', itens }, '*');
+  return true;
+}
+async function consultarTodosProprietarios(lista){
+  const pend = (lista || []).filter(s => !nomeProprietario(s));
+  if (!pend.length) { mostrarToast('Todos os lotes já têm proprietário registrado.'); return; }
+  if (!(await extPropDisponivel())) {
+    mostrarToast('Extensão "Yuny · Consulta de proprietários" não encontrada neste navegador. Instale-a (ou recarregue a página) para consultar todos de uma vez.', 8000);
+    return;
+  }
+  if (_propAuto) { mostrarToast('Já existe uma consulta em andamento.'); return; }
+  if (pend.length > 30 && !confirm(`Consultar ${pend.length} lotes? Com 3 s entre consultas leva cerca de ${Math.ceil(pend.length * 8 / 60)} min.`)) return;
+  await consultarViaExtensao(pend);
+}
+
 
 // Bloco que aparece dentro de cada lote na ficha
 function htmlProprietario(sql){
@@ -3173,7 +3255,7 @@ let qfilters={
   vgvMin:0, vgvMax:Infinity,       // em R$ milhões
   precoMin:0, precoMax:Infinity,   // R$/m²
   caMin:0, caMax:Infinity,
-  nLotesMax:Infinity, estRaio:Infinity, estModo:'todos', estFuturas:false, // só valem no perfil MCMV
+  nLotesMax:Infinity, estRaio:Infinity, estModo:'todos', estFuturas:false, mercClasses:null, // só valem no perfil MCMV
   caMaxZonaMin:2, caMaxZonaMax:Infinity,  // CA máx do zoneamento: padrão 2 (abaixo disso não há potencial de incorporação)
 };
 // Lê os 10 campos de min/máx de uma vez e reaplica os filtros — com um
@@ -3208,6 +3290,8 @@ function _lerFiltrosMcmv(){
   qfilters.estRaio = num('qf-est-raio', Infinity);
   qfilters.estModo = document.querySelector('input[name="qf-est-modo"]:checked')?.value || 'todos';
   qfilters.estFuturas = !!document.getElementById('qf-est-futuras')?.checked;
+  const marcadas = ['PRIORITARIO','SELETIVO','SEM_DADO','EVITAR'].filter(c => document.getElementById('qf-merc-'+c)?.checked);
+  qfilters.mercClasses = marcadas.length && marcadas.length < 4 ? new Set(marcadas) : null; // todas ou nenhuma = sem filtro
 }
 let selectedSql=null, selectedQid=null, selectedSubId=null, selectedBairro=null, visibleLotes=[], visibleQuadras=[];
 
@@ -6934,6 +7018,11 @@ function distEstacaoFiltro(lat, lon, modo, incluirFuturas, raioMax){
 }
 function subPassaFiltrosMcmv(q, sub){
   if (sub.n > qfilters.nLotesMax) return false;
+  if (qfilters.mercClasses) {
+    const c = centroRapidoSub(q, sub.lotes);
+    const t = teseDoPonto(c.lat, c.lon);
+    if (!qfilters.mercClasses.has(t ? t.classe : 'SEM_DADO')) return false;
+  }
   if (qfilters.estRaio < Infinity) {
     const c = centroRapidoSub(q, sub.lotes);
     if (distEstacaoFiltro(c.lat, c.lon, qfilters.estModo, qfilters.estFuturas, qfilters.estRaio) > qfilters.estRaio) return false;
@@ -6957,6 +7046,7 @@ function aplicarPadroesMcmv(ligar){
   if (ligar) {
     if (_mcmvCamaxAlto === null && caMin) _mcmvCamaxAlto = caMin.value;
     set('qf-camax-min','4'); set('qf-nlotes-max','1'); set('qf-est-raio','500');
+    ['PRIORITARIO','SELETIVO','SEM_DADO','EVITAR'].forEach(c=>{ const el=document.getElementById('qf-merc-'+c); if(el) el.checked = (c==='PRIORITARIO'||c==='SELETIVO'); });
     const r=document.querySelector('input[name="qf-est-modo"][value="todos"]'); if(r) r.checked=true;
     const f=document.getElementById('qf-est-futuras'); if(f) f.checked=false;
   } else if (_mcmvCamaxAlto !== null && caMin) {
@@ -8789,6 +8879,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       </div>` : ''}
     <div class="dp-sec">
       <div class="dp-st">Lotes contíguos${_stats.dividido?' desta parte':' do grupo'}${_combo?' — combinado c/ vínculo':''}</div>
+      ${(()=>{ const lista=(_combo ? _combo.gruposLotes.flatMap(g=>g.lotes.map(l=>g.qidBase+'.'+l)) : _stats.lotes.map(l=>q.id.split('-')[0]+'.'+l)); const pend=lista.filter(s=>!nomeProprietario(s)); return pend.length>1 ? `<div style="margin:2px 0 6px"><button class="prop-btn" style="font-size:10.5px;padding:3px 9px" onclick='consultarTodosProprietarios(${JSON.stringify(pend)})'>🔍 Consultar todos (${pend.length})</button></div>` : ''; })()}
       <table style="width:100%;border-collapse:collapse;font-size:11px">
         <thead><tr>
           <th style="text-align:left;padding:3px 6px;color:#888;font-weight:600;border-bottom:1px solid #ddd">SQL</th>
