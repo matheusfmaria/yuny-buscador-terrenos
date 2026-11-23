@@ -552,7 +552,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
     </div>
     <div class="profile-toggle">
       <button class="profile-btn on" id="profile-alto" onclick="setProfile('alto')">Alto padrão</button>
-      <button class="profile-btn" id="profile-compacto" onclick="setProfile('compacto')" title="Tese MCMV: HIS-2 até R$ 383,6 mil por unidade, perto de estações, com proprietário único ou poucos">Econômico · MCMV</button>
+      <button class="profile-btn" id="profile-compacto" onclick="setProfile('compacto')" title="HIS compacto (estudo de nov/2026): região Lançar/Monitorar/Ignorar, perto de estações, esquina, frente larga e poucos lotes">Econômico · MCMV</button>
     </div>
   </div>
   <div class="search-wrap">
@@ -607,13 +607,22 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
         <div style="font-size:9.5px;color:#aaa;margin:-2px 0 6px;line-height:1.4">Zona com CA máx. 1 não tem potencial de incorporação. Áreas em Operação Urbana contam como 4,0 (regra própria, não segue o zoneamento).</div>
         <div id="bloco-mcmv-filtros" style="display:none;border:1px solid #c8e6c9;background:#f4faf4;border-radius:6px;padding:6px 8px;margin:6px 0">
           <div class="fl" style="margin-top:0;color:#1b5e20">Econômico · MCMV</div>
-          <div class="fl">Mercado F3 2 dorm. (tese)</div>
-          <label class="check-row"><input type="checkbox" id="qf-merc-PRIORITARIO" checked onchange="atualizarFiltroNumerico()"> 🟩 Prioritário</label>
-          <label class="check-row"><input type="checkbox" id="qf-merc-SELETIVO" checked onchange="atualizarFiltroNumerico()"> 🟨 Seletivo</label>
-          <label class="check-row"><input type="checkbox" id="qf-merc-SEM_DADO" onchange="atualizarFiltroNumerico()"> ⬜ Sem dado</label>
-          <label class="check-row"><input type="checkbox" id="qf-merc-EVITAR" onchange="atualizarFiltroNumerico()"> 🟥 Evitar</label>
+          <div class="fl">Estudo HIS compacto (região)</div>
+          <label class="check-row"><input type="checkbox" id="qf-estudo-LANCAR" checked onchange="atualizarFiltroNumerico()"> 🟩 Lançar</label>
+          <label class="check-row"><input type="checkbox" id="qf-estudo-MONITORAR" checked onchange="atualizarFiltroNumerico()"> 🟨 Monitorar</label>
+          <label class="check-row"><input type="checkbox" id="qf-estudo-IGNORAR" checked onchange="atualizarFiltroNumerico()"> 🟥 Ignorar</label>
+          <label class="check-row"><input type="checkbox" id="qf-estudo-SEM_DADO" checked onchange="atualizarFiltroNumerico()"> ⬜ Sem HIS compacto na região</label>
           <div class="fl">Máx. de lotes na composição</div>
           <div class="minmax-row"><input type="number" id="qf-nlotes-max" min="1" step="1" placeholder="Máx" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
+          <div class="fl">Frente mínima da composição (m)</div>
+          <div class="minmax-row"><input type="number" id="qf-frente-min" min="0" step="1" placeholder="Mín" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
+          <div style="font-size:9.5px;color:#888;line-height:1.4;margin-bottom:4px">Soma da testada (cadastro IPTU) dos lotes que dão frente para a rua; lote sem testada cadastrada não é excluído.</div>
+          <label class="check-row"><input type="checkbox" id="qf-esquina" checked onchange="atualizarFiltroNumerico()"> Apenas imóveis em esquina</label>
+          <div class="fl">Uso do imóvel (cadastro IPTU)</div>
+          <label class="check-row"><input type="checkbox" id="qf-uso-comercial" checked onchange="atualizarFiltroNumerico()"> 🏬 Comercial / não residencial</label>
+          <label class="check-row"><input type="checkbox" id="qf-uso-misto" checked onchange="atualizarFiltroNumerico()"> 🏘 Misto</label>
+          <label class="check-row"><input type="checkbox" id="qf-uso-residencial" checked onchange="atualizarFiltroNumerico()"> 🏠 Residencial</label>
+          <label class="check-row"><input type="checkbox" id="qf-uso-vago" checked onchange="atualizarFiltroNumerico()"> ⬜ Terreno vago</label>
           <div class="fl">Distância máx. da estação mais próxima (m)</div>
           <div class="minmax-row"><input type="number" id="qf-est-raio" min="0" step="50" placeholder="Raio (m)" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
           <label class="check-row"><input type="radio" name="qf-est-modo" value="todos" checked onchange="atualizarFiltroNumerico()"> Trem e metrô</label>
@@ -3349,7 +3358,8 @@ let qfilters={
   vgvMin:0, vgvMax:Infinity,       // em R$ milhões
   precoMin:0, precoMax:Infinity,   // R$/m²
   caMin:0, caMax:Infinity,
-  nLotesMax:Infinity, estRaio:Infinity, estModo:'todos', estFuturas:false, mercClasses:null, // só valem no perfil MCMV
+  nLotesMax:Infinity, estRaio:Infinity, estModo:'todos', estFuturas:false, // só valem no perfil MCMV
+  frenteMin:0, soEsquina:false, usoClasses:null, estudoClasses:null, // idem (estudo HIS compacto, 23/11/2026)
   caMaxZonaMin:2, caMaxZonaMax:Infinity,  // CA máx do zoneamento: padrão 2 (abaixo disso não há potencial de incorporação)
 };
 // Lê os 10 campos de min/máx de uma vez e reaplica os filtros — com um
@@ -3384,8 +3394,12 @@ function _lerFiltrosMcmv(){
   qfilters.estRaio = num('qf-est-raio', Infinity);
   qfilters.estModo = document.querySelector('input[name="qf-est-modo"]:checked')?.value || 'todos';
   qfilters.estFuturas = !!document.getElementById('qf-est-futuras')?.checked;
-  const marcadas = ['PRIORITARIO','SELETIVO','SEM_DADO','EVITAR'].filter(c => document.getElementById('qf-merc-'+c)?.checked);
-  qfilters.mercClasses = marcadas.length && marcadas.length < 4 ? new Set(marcadas) : null; // todas ou nenhuma = sem filtro
+  qfilters.frenteMin = num('qf-frente-min', 0);
+  qfilters.soEsquina = !!document.getElementById('qf-esquina')?.checked;
+  const usos = ['comercial','misto','residencial','vago'].filter(c => document.getElementById('qf-uso-'+c)?.checked);
+  qfilters.usoClasses = usos.length && usos.length < 4 ? new Set(usos) : null;
+  const ests = ['LANCAR','MONITORAR','IGNORAR','SEM_DADO'].filter(c => document.getElementById('qf-estudo-'+c)?.checked);
+  qfilters.estudoClasses = ests.length && ests.length < 4 ? new Set(ests) : null;
 }
 let selectedSql=null, selectedQid=null, selectedSubId=null, selectedBairro=null, visibleLotes=[], visibleQuadras=[];
 
@@ -6978,33 +6992,34 @@ function applyQFilters() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// PERFIL ECONÔMICO · MCMV (tese HIS-2, 17/11/2026)
+// PERFIL ECONÔMICO · MCMV (estudo HIS compacto, 23/11/2026 — a tese F3 anterior foi retirada)
 // Produto: apartamento de 2 dorm. HIS-2 até o teto de R$ 383.636,74/unid.
 // Dados: pacotes_extra/tese_mcmv.json (mercado F3 por célula de 1 km e por
 // distrito) e pacotes_extra/transporte.json (estações e linhas). Carregados
 // só quando o perfil é ligado ou uma camada de transporte é aberta — não
 // pesam na abertura do app.
 // ═══════════════════════════════════════════════════════════════════════
-let TESE_MCMV = null, TRANSPORTE = null, _mcmvCarregando = null;
+let TRANSPORTE = null, HIS_COMP = null, _mcmvCarregando = null;
 const TETO_HIS2 = 383636.74;
-const _teseCache = new Map(), _estGrade = new Map(), _estGradeTodas = new Map(), _mcmvTerrenoCache = new Map(), _centroRapidoCache = new Map();
+const _hisCache = new Map(), _atribLotesCache = new Map(), _estGrade = new Map(), _estGradeTodas = new Map(), _mcmvTerrenoCache = new Map(), _centroRapidoCache = new Map();
 async function carregarDadosMcmv(){
-  if (TESE_MCMV && TRANSPORTE) return true;
+  if (HIS_COMP && TRANSPORTE) return true;
   if (_mcmvCarregando) return _mcmvCarregando;
   _mcmvCarregando = (async()=>{
     try {
-      const [t, tr] = await Promise.all([
-        fetchComCache('pacotes_extra/tese_mcmv.json', 60000, 4000),
+      const [h, tr] = await Promise.all([
+        fetchComCache('pacotes_extra/his_compacto.json', 60000, 4000),
         fetchComCache('pacotes_extra/transporte.json', 60000, 4000)]);
-      if (!t || !tr) return false;
-      TESE_MCMV = t; TRANSPORTE = tr;
-      _teseCache.clear(); _estGrade.clear(); _estGradeTodas.clear(); _mcmvTerrenoCache.clear();
+      if (!h || !tr) return false;
+      HIS_COMP = h; TRANSPORTE = tr;
+      _estGrade.clear(); _estGradeTodas.clear(); _mcmvTerrenoCache.clear();
       tr.estacoes.forEach((e,i)=>{
         const k = Math.floor(e[0]/0.01)+','+Math.floor(e[1]/0.01);
         let b = _estGradeTodas.get(k); if (!b) { b=[]; _estGradeTodas.set(k,b); } b.push(i);
         if (e[5] === 'F') return; // sem prazo ≤ 2030 não conta como atrativo no score
         b = _estGrade.get(k); if (!b) { b=[]; _estGrade.set(k,b); } b.push(i);
       });
+      _hisCache.clear(); _atribLotesCache.clear();
       return true;
     } catch(err) { console.warn('Dados MCMV indisponíveis:', err); return false; }
     finally { _mcmvCarregando = null; }
@@ -7013,23 +7028,6 @@ async function carregarDadosMcmv(){
 }
 function _kmEntre(lat1,lon1,lat2,lon2){
   return Math.hypot((lat1-lat2)*111.32, (lon1-lon2)*111.32*Math.cos(lat1*Math.PI/180));
-}
-// Mercado F3 2 dorm. no ponto: célula de 1 km; sem vendas na célula, distrito mais próximo (até 2 km)
-function teseDoPonto(lat, lon){
-  if (!TESE_MCMV) return null;
-  const k = Math.floor(lat/0.009)+'_'+Math.floor(lon/0.009);
-  if (_teseCache.has(k)) return _teseCache.get(k);
-  let r = null;
-  const c = TESE_MCMV.cells[k];
-  if (c && c[6]) r = {fonte:'célula de 1 km', classe:c[0], score:c[1], meses:c[2], rev:c[3], precoM2:c[4], ticket:c[5], vendas:c[6], folga:c[7], lanc:c[8], distrito:c[9]};
-  else {
-    let best=null, bd=Infinity;
-    TESE_MCMV.distritos.forEach(d=>{ const km=_kmEntre(lat,lon,d[1],d[2]); if (km<=2 && km<bd){bd=km;best=d;} });
-    if (best) r = {fonte:'distrito próximo', classe:best[3], score:best[4], meses:best[5], rev:best[6], precoM2:best[7], ticket:best[8], vendas:best[9], folga:best[10], lanc:best[11], distrito:best[0]};
-  }
-  if (!r) r = {fonte:'sem dado', classe:'SEM_DADO'};
-  _teseCache.set(k, r);
-  return r;
 }
 // Atrativo de estação: existente/aberta = "enorme"; prevista até 2030 = "grande"
 // Metrô vale mais que trem (pedido do Matheus): trem pontua ~80% do metrô
@@ -7055,14 +7053,14 @@ function estacaoAtrativa(lat, lon){
 const ZONA_MCMV = {ZEU:10,ZEUa:9,ZEUb:9,ZEUP:8,ZEM:8,ZEMa:7,ZEMP:6,ZC:7,'ZC-ZEIS':7,ZM:4,ZMIS:4,ZMISa:3,'ZEIS-1':5,'ZEIS-2':5,'ZEIS-3':5,'ZEIS-4':5,'ZEIS-5':5,'ZCOR-1':4,'ZCOR-2':4,'ZCOR-3':4};
 function negMcmv(n){ return n<=1?20 : n===2?19 : n===3?16 : n===4?13 : n===5?10 : n<=8?6 : 2; }
 // Terreno × VGV: R$/m² de terreno (avaliação por ITBI) ÷ (CA × 0,8 × preço da unidade/m² limitado ao teto)
-function incidenciaTerrenoMcmv(q, area, lotes, tese){
+function incidenciaTerrenoMcmv(q, area, lotes, estudo){
   const chave = q.id.split('-')[0]+'|'+[...(lotes||[])].sort().join(',');
   if (_mcmvTerrenoCache.has(chave)) return _mcmvTerrenoCache.get(chave);
   let r = {pts:7, incid:null, terrenoM2:null};
   try {
     const ref = refDaComposicao(q.id.split('-')[0], lotes);
     const av = ref ? avaliarTerreno(q.lat, q.lon, ref, area, q.zona) : null;
-    const pm2 = tese && tese.precoM2 ? Math.min(tese.precoM2, TETO_HIS2/36) : TETO_HIS2/36;
+    const pm2 = estudo && estudo.pm ? Math.min(estudo.pm, TETO_HIS2/36) : TETO_HIS2/36; // R$/m² mediano das vendas HIS compacto da região (estudo)
     if (av && av.suficiente) {
       const ca = caEfetivo(q.zona, q.ou);
       const incid = av.mediana / (ca*0.8*pm2);
@@ -7112,10 +7110,15 @@ function distEstacaoFiltro(lat, lon, modo, incluirFuturas, raioMax){
 }
 function subPassaFiltrosMcmv(q, sub){
   if (sub.n > qfilters.nLotesMax) return false;
-  if (qfilters.mercClasses) {
+  if (qfilters.estudoClasses && HIS_COMP) {
     const c = centroRapidoSub(q, sub.lotes);
-    const t = teseDoPonto(c.lat, c.lon);
-    if (!qfilters.mercClasses.has(t ? t.classe : 'SEM_DADO')) return false;
+    if (!qfilters.estudoClasses.has(estudoClasse(areaHisDoPonto(c.lat, c.lon)))) return false;
+  }
+  if (qfilters.frenteMin > 0 || qfilters.soEsquina || qfilters.usoClasses) {
+    const at = atributosLotes(q, sub.lotes);
+    if (qfilters.soEsquina && !at.esquina) return false;
+    if (qfilters.frenteMin > 0 && at.frente != null && at.frente < qfilters.frenteMin) return false;
+    if (qfilters.usoClasses && at.uso && !qfilters.usoClasses.has(at.uso)) return false;
   }
   if (qfilters.estRaio < Infinity) {
     const c = centroRapidoSub(q, sub.lotes);
@@ -7130,7 +7133,7 @@ function distritosMcmv(){
   const alvo = new Set(MCMV_DISTRITOS_NOMES.map(_semAcento));
   return DISTRITOS_DISPONIVEIS.filter(d => alvo.has(_semAcento(d.distrito))).map(d=>d.distrito);
 }
-let _mcmvCamaxAlto = null;
+let _mcmvCamaxAlto = null, _mcmvAreaAlto = null;
 // Liga/desliga os padrões exclusivos do perfil MCMV (e restaura os do Alto padrão)
 function aplicarPadroesMcmv(ligar){
   const bloco = document.getElementById('bloco-mcmv-filtros');
@@ -7139,60 +7142,160 @@ function aplicarPadroesMcmv(ligar){
   const set = (id,v)=>{ const el=document.getElementById(id); if(el) el.value=v; };
   if (ligar) {
     if (_mcmvCamaxAlto === null && caMin) _mcmvCamaxAlto = caMin.value;
-    set('qf-camax-min','4'); set('qf-nlotes-max','1'); set('qf-est-raio','500');
-    ['PRIORITARIO','SELETIVO','SEM_DADO','EVITAR'].forEach(c=>{ const el=document.getElementById('qf-merc-'+c); if(el) el.checked = (c==='PRIORITARIO'||c==='SELETIVO'); });
+    if (_mcmvAreaAlto === null) _mcmvAreaAlto = {min: document.getElementById('qf-area-min')?.value ?? '', max: document.getElementById('qf-area-max')?.value ?? ''};
+    set('qf-camax-min','4'); set('qf-nlotes-max','3'); set('qf-est-raio','500');
+    set('qf-area-min','1200'); set('qf-area-max','1800'); set('qf-frente-min','30');
+    const esq=document.getElementById('qf-esquina'); if(esq) esq.checked=true;
+    ['comercial','misto','residencial','vago'].forEach(c=>{ const el=document.getElementById('qf-uso-'+c); if(el) el.checked=true; });
+    ['LANCAR','MONITORAR','IGNORAR','SEM_DADO'].forEach(c=>{ const el=document.getElementById('qf-estudo-'+c); if(el) el.checked=true; });
     const r=document.querySelector('input[name="qf-est-modo"][value="todos"]'); if(r) r.checked=true;
     const f=document.getElementById('qf-est-futuras'); if(f) f.checked=false;
-  } else if (_mcmvCamaxAlto !== null && caMin) {
-    caMin.value = _mcmvCamaxAlto; _mcmvCamaxAlto = null;
-    qfilters.caMaxZonaMin = parseFloat(caMin.value)||0;
+  } else {
+    if (_mcmvCamaxAlto !== null && caMin) {
+      caMin.value = _mcmvCamaxAlto; _mcmvCamaxAlto = null;
+      qfilters.caMaxZonaMin = parseFloat(caMin.value)||0;
+    }
+    if (_mcmvAreaAlto !== null) {
+      set('qf-area-min', _mcmvAreaAlto.min); set('qf-area-max', _mcmvAreaAlto.max); _mcmvAreaAlto = null;
+      const n=(id,d)=>{const v=parseFloat(document.getElementById(id)?.value);return isNaN(v)?d:v;};
+      qfilters.areaMin = n('qf-area-min',0); qfilters.areaMax = n('qf-area-max',Infinity);
+    }
   }
   const num=(id,d)=>{const v=parseFloat(document.getElementById(id)?.value);return isNaN(v)?d:v;};
-  if (ligar) qfilters.caMaxZonaMin = num('qf-camax-min',0);
+  if (ligar) { qfilters.caMaxZonaMin = num('qf-camax-min',0); qfilters.areaMin = num('qf-area-min',0); qfilters.areaMax = num('qf-area-max',Infinity); }
   _lerFiltrosMcmv();
 }
+// ── Estudo HIS compacto (23/11/2026): decisão Lançar/Monitorar/Ignorar por área de ponderação ──
+// Pacote pacotes_extra/his_compacto.json: polígonos [lon,lat] + métricas do estudo (HIS-1 e HIS-2 até 35 m²).
+function _pontoEmAnel(x, y, ring){
+  let dentro = false;
+  for (let i=0, j=ring.length-1; i<ring.length; j=i++) {
+    const xi=ring[i][0], yi=ring[i][1], xj=ring[j][0], yj=ring[j][1];
+    if (((yi>y)!==(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi)) dentro = !dentro;
+  }
+  return dentro;
+}
+function areaHisDoPonto(lat, lon){
+  if (!HIS_COMP) return null;
+  const k = lat.toFixed(5)+','+lon.toFixed(5);
+  if (_hisCache.has(k)) return _hisCache.get(k);
+  let achada = null;
+  for (const a of HIS_COMP.areas) {
+    const bb = a.bb; if (lon<bb[0] || lon>bb[2] || lat<bb[1] || lat>bb[3]) continue;
+    if (!_pontoEmAnel(lon, lat, a.g[0])) continue;
+    let furo = false;
+    for (let h=1; h<a.g.length; h++) if (_pontoEmAnel(lon, lat, a.g[h])) { furo = true; break; }
+    if (!furo) { achada = a; break; }
+  }
+  _hisCache.set(k, achada);
+  return achada;
+}
+function estudoClasse(a){ return !a ? 'SEM_DADO' : a.d===1 ? 'LANCAR' : a.d===2 ? 'MONITORAR' : a.d===3 ? 'IGNORAR' : 'SEM_DADO'; }
+// Lançar vale 10 + bônus pela prioridade do estudo (1 = +5, 2 = +3, 3 = +1); Monitorar 6; sem HIS na região 2; Ignorar 0
+function ptsEstudoHis(a){
+  const c = estudoClasse(a);
+  if (c==='LANCAR') return Math.min(15, 10 + ({1:5,2:3,3:1}[a.p]||0));
+  return c==='MONITORAR' ? 6 : c==='SEM_DADO' ? 2 : 0;
+}
+// Atributos do cadastro IPTU da composição: esquina, frente (soma das testadas) e uso
+const USOS_IPTU_RESIDENCIAL = new Set([2,3,5,7,8,14,32,33,34,37]); // inclui "predominância residencial"
+function atributosLotes(q, lotes){
+  const qb = q.id.split('-')[0];
+  const chave = qb+'|'+(lotes||[]).join(',');
+  let r = _atribLotesCache.get(chave);
+  if (r) return r;
+  let frente = 0, temFrente = false, esquina = false, nRes = 0, nNres = 0, nVago = 0, semCad = 0;
+  const esquinaLotes = [], usosTxt = new Set();
+  (lotes||[]).forEach(l => {
+    const a = IPTU_RAW[qb+'.'+l];
+    if (!a) { semCad++; return; }
+    const tt = a[9];
+    if (tt===1 || tt===6) { esquina = true; esquinaLotes.push(l); }
+    if (a[6] > 0 && tt!==3 && tt!==4 && tt!==5) { frente += a[6]; temFrente = true; } // fundos / interno / encravado não dão frente
+    const uso = a[7];
+    if (uso===9 || !(a[0] > 0)) nVago++;
+    else if (USOS_IPTU_RESIDENCIAL.has(uso)) nRes++;
+    else nNres++;
+    if (uso >= 0 && IPTU_USOS[uso]) usosTxt.add(IPTU_USOS[uso]);
+  });
+  const uso = nRes && nNres ? 'misto' : nNres ? 'comercial' : nRes ? 'residencial' : nVago ? 'vago' : null;
+  r = {frente: temFrente ? frente : null, esquina, esquinaLotes, uso, semCad, usosTxt: [...usosTxt]};
+  _atribLotesCache.set(chave, r);
+  return r;
+}
+// Pesos do score do perfil (somam 100) — ajustar só aqui
+const PESOS_MCMV = {estudo:30, est:20, zon:8, lotes:12, terreno:10, area:5, frente:5, esquina:4, uso:6};
+const PTS_USO = {comercial:1, misto:0.65, vago:0.5, residencial:0}; // fração de PESOS_MCMV.uso
+// 1 lote = excelente, 2 = bom, 3 = razoável, acima disso zera
+const FRACAO_LOTES = n => n<=1 ? 1 : n===2 ? 0.7 : n===3 ? 0.4 : 0;
 function scoreMcmvDetalhe(q, area, n, lotes){
+  const P = PESOS_MCMV;
   const ce = centroRapidoSub(q, lotes);
-  const tese = teseDoPonto(ce.lat, ce.lon);
   const est = estacaoAtrativa(ce.lat, ce.lon);
-  const classePts = {PRIORITARIO:20, SELETIVO:14, SEM_DADO:5, EVITAR:0}[tese?tese.classe:'SEM_DADO'] ?? 5;
-  const merc = Math.min(30, classePts + (tese && tese.score ? Math.round(tese.score/10) : 0));
-  const zon = ZONA_MCMV[q.zona] || 0;
-  const neg = negMcmv(n);
-  const are = janelaScore(Math.round(area), 1500, 8000, 800, 15000, 5);
-  const ter = incidenciaTerrenoMcmv(q, area, lotes, tese);
-  const estPts = est ? est.pts : 0;
-  return {tese, est, merc, estPts, zon, neg, are, ter, total: Math.min(100, merc+estPts+zon+neg+are+ter.pts)};
+  const estudo = areaHisDoPonto(ce.lat, ce.lon);
+  const at = atributosLotes(q, lotes);
+  const estudoPts = Math.round(ptsEstudoHis(estudo) * P.estudo/15); // Lançar 20–30, Monitorar 12, sem HIS na região 4, Ignorar 0
+  const estPts = est ? Math.round(est.pts * P.est/25) : 0;
+  const zon = Math.round((ZONA_MCMV[q.zona] || 0) * P.zon/10);
+  const neg = Math.round(FRACAO_LOTES(n) * P.lotes);
+  const are = janelaScore(Math.round(area), 1200, 1800, 800, 2600, P.area);
+  const ter = incidenciaTerrenoMcmv(q, area, lotes, estudo);
+  const terPts = Math.round(ter.pts * P.terreno/15);
+  const frentePts = at.frente==null ? Math.round(P.frente/2) : Math.round(Math.max(0, Math.min(1, (at.frente-15)/30)) * P.frente);
+  const esquinaPts = at.esquina ? P.esquina : 0;
+  const usoPts = at.uso ? Math.round((PTS_USO[at.uso]||0) * P.uso) : Math.round(P.uso/3);
+  const total = Math.min(100, estudoPts+estPts+zon+neg+are+terPts+frentePts+esquinaPts+usoPts);
+  return {est, estudo, at, estudoPts, estPts, zon, neg, are, ter, terPts, frentePts, esquinaPts, usoPts, total};
 }
 function scoreMcmv(q, area, n, lotes){
   if (n === 0) return 0;
-  if (!TESE_MCMV || !TRANSPORTE) return 0;
+  if (!HIS_COMP || !TRANSPORTE) return 0;
   return scoreMcmvDetalhe(q, area, n, lotes).total;
 }
 function htmlScoreMcmv(q, stats){
   const d = scoreMcmvDetalhe(q, stats.area, stats.n, stats.lotes);
-  const t = d.tese || {classe:'SEM_DADO'};
-  const cor = {PRIORITARIO:'#2e7d32',SELETIVO:'#f9a825',EVITAR:'#c62828',SEM_DADO:'#757575'}[t.classe];
   const fm = v=>v==null?'—':Math.round(v).toLocaleString('pt-BR');
   const estTxt = d.est && d.est.pts ? `${d.est.classe==='E'?'🚇 Enorme atrativo':'🚧 Grande atrativo'} · ${d.est.modo==='metro'?'metrô':'trem'} — ${d.est.nome} (${d.est.linha}), ${d.est.m} m · ${d.est.prazo}` : 'Nenhuma estação existente ou prevista até 2030 em 1,5 km';
-  const comp = (TESE_MCMV.comparaveis||[]).map(c=>({c, km:_kmEntre(q.lat,q.lon,c[0],c[1])})).filter(x=>x.km<=1.5).sort((a,b)=>a.km-b.km).slice(0,5);
-  const teto = t.precoM2 ? Math.min(t.precoM2*36, TETO_HIS2) : null;
   const nTxt = stats.n===1?'1 lote (proprietário único, se confirmado)':stats.n+' lotes';
   return [
-    scoreBar('Mercado F3 2 dorm. ('+t.classe.replace('_',' ').toLowerCase()+')', d.merc, 30),
-    scoreBar('Estação de trem/metrô', d.estPts, 25),
-    scoreBar('Zoneamento ('+q.zona+')', d.zon, 10),
-    scoreBar('Facilidade de negociação ('+nTxt+')', d.neg, 20),
-    scoreBar('Terreno × VGV'+(d.ter.incid!=null?' (incidência '+(d.ter.incid*100).toFixed(0)+'% do VGV)':' (sem avaliação)'), d.ter.pts, 15),
-    scoreBar('Área da composição', d.are, 5),
+    scoreBar('Estudo HIS compacto ('+(d.estudo?(d.estudo.d===1?'Lançar':d.estudo.d===2?'Monitorar':'Ignorar'):'sem HIS compacto na região')+')', d.estudoPts, PESOS_MCMV.estudo),
+    scoreBar('Estação de trem/metrô', d.estPts, PESOS_MCMV.est),
+    scoreBar('Zoneamento ('+q.zona+')', d.zon, PESOS_MCMV.zon),
+    scoreBar('Nº de lotes ('+nTxt+')', d.neg, PESOS_MCMV.lotes),
+    scoreBar('Terreno × VGV'+(d.ter.incid!=null?' (incidência '+(d.ter.incid*100).toFixed(0)+'% do VGV)':' (sem avaliação)'), d.terPts, PESOS_MCMV.terreno),
+    scoreBar('Área da composição (ideal 1.200–1.800 m²)', d.are, PESOS_MCMV.area),
+    scoreBar('Frente'+(d.at.frente!=null?' ('+d.at.frente.toLocaleString('pt-BR',{maximumFractionDigits:1})+' m)':' (sem testada cadastrada)'), d.frentePts, PESOS_MCMV.frente),
+    scoreBar('Imóvel em esquina'+(d.at.esquina?' (sim)':' (não)'), d.esquinaPts, PESOS_MCMV.esquina),
+    scoreBar('Uso do imóvel ('+({comercial:'comercial / não residencial',misto:'misto',residencial:'residencial',vago:'terreno vago'}[d.at.uso]||'sem cadastro')+')', d.usoPts, PESOS_MCMV.uso),
   ].join('') + `
-    <div style="margin-top:8px;padding:8px 10px;border:1px solid #e0e0e0;border-left:4px solid ${cor};border-radius:6px;font-size:11.5px;line-height:1.55;background:#fafafa">
-      <div style="font-weight:700;margin-bottom:3px">Tese MCMV · HIS-2 até R$ 383,6 mil/unid. <span style="color:${cor}">${t.classe.replace('_',' ')}</span></div>
-      ${t.fonte&&t.fonte!=='sem dado'?`<div>${t.fonte}${t.distrito?' · '+t.distrito:''}: ${fm(t.vendas)} vendas líq./12m · estoque ${t.meses!=null?t.meses.toLocaleString('pt-BR'):'—'} meses · reversões ${t.rev!=null?(t.rev*100).toFixed(0)+'%':'—'} das vendas · R$ ${fm(t.precoM2)}/m²${teto?' · unidade de 36 m² ≈ R$ '+fm(teto):''}</div>`:'<div>Sem vendas F3 2 dorm. na região pesquisada.</div>'}
+    <div style="margin-top:8px;padding:8px 10px;border:1px solid #e0e0e0;border-left:4px solid #1b5e20;border-radius:6px;font-size:11.5px;line-height:1.55;background:#fafafa">
+      <div style="font-weight:700;margin-bottom:3px">Transporte e negociação</div>
       <div>${estTxt}</div>
-      ${comp.length?`<div style="margin-top:3px;color:#555"><strong>Comparáveis (F3 2 dorm., até 1,5 km):</strong> ${comp.map(x=>`${escapeHtmlHistorico(x.c[2])} (${x.km.toFixed(1)} km${x.c[5]?`, R$ ${fm(x.c[5])}`:''})`).join(' · ')}</div>`:''}
       <div style="margin-top:4px;color:#6d4c00"><strong>Negociação:</strong> priorizar permuta (física ou financeira) ou dinheiro com fluxo alongado após a aprovação do projeto — por isso o score favorece proprietário único ou poucos.</div>
-    </div>`;
+    </div>` + htmlEstudoHis(d);
+}
+function htmlEstudoHis(d){
+  const a = d.estudo, at = d.at;
+  const fm = v=>v==null?'—':Math.round(v).toLocaleString('pt-BR');
+  const fx = (v,dec)=>v==null?'—':v.toLocaleString('pt-BR',{minimumFractionDigits:dec,maximumFractionDigits:dec});
+  const linhaLote = `<div style="margin-top:3px;color:#555"><strong>Cadastro IPTU:</strong> frente ${at.frente!=null?fx(at.frente,1)+' m':'sem testada'} · ${at.esquina?'esquina (lote '+at.esquinaLotes.join(', ')+')':'não é esquina'} · uso ${({comercial:'comercial / não residencial',misto:'misto',residencial:'residencial',vago:'terreno vago'}[at.uso]||'sem cadastro')}${at.usosTxt.length?' — '+at.usosTxt.map(escapeHtmlHistorico).join('; '):''}</div>`;
+  if (!HIS_COMP) return `<div style="margin-top:8px;padding:8px 10px;border:1px solid #e0e0e0;border-left:4px solid #757575;border-radius:6px;font-size:11.5px;background:#fafafa"><div style="font-weight:700">Estudo HIS compacto</div><div>Pacote do estudo (his_compacto.json) não foi carregado.</div>${linhaLote}</div>`;
+  if (!a) return `<div style="margin-top:8px;padding:8px 10px;border:1px solid #e0e0e0;border-left:4px solid #757575;border-radius:6px;font-size:11.5px;background:#fafafa"><div style="font-weight:700">Estudo HIS compacto · fora das áreas mapeadas</div>${linhaLote}</div>`;
+  const cl = estudoClasse(a);
+  const cor = {LANCAR:'#2e7d32',MONITORAR:'#f9a825',IGNORAR:'#c62828',SEM_DADO:'#757575'}[cl];
+  const rot = {LANCAR:'Lançar',MONITORAR:'Monitorar',IGNORAR:'Ignorar',SEM_DADO:'Sem HIS compacto nas pesquisas'}[cl];
+  const faixa = (nome,h)=> (h && (h.uv>0 || h.ul>0 || h.es>0)) ? `<div>${nome}: <strong>${h.dc===1?'Lançar':h.dc===2?'Monitorar':'Ignorar'}</strong>${h.sc!=null?' · score '+h.sc:''} · ${fm(h.uv)} vendidas · ${fm(h.ul)} lançadas · estoque ${h.ms!=null?fx(h.ms,1)+' m':'—'} · ticket R$ ${fm(h.tk)}${h.ic?' · líder '+escapeHtmlHistorico(h.ic)+' ('+fm(h.ish)+'%)':''}</div>` : '';
+  return `<div style="margin-top:8px;padding:8px 10px;border:1px solid #e0e0e0;border-left:4px solid ${cor};border-radius:6px;font-size:11.5px;line-height:1.55;background:#fafafa">
+    <div style="font-weight:700;margin-bottom:3px">Estudo HIS compacto · ${escapeHtmlHistorico(a.n)} (${escapeHtmlHistorico(a.z)}) <span style="color:${cor}">${rot}</span>${a.s!=null?' · score '+a.s+'/100 · prioridade '+a.p+' de 3':''}</div>
+    ${cl==='SEM_DADO' ? '<div>Nenhum empreendimento HIS compacto (até 35 m²) foi pesquisado nesta área de ponderação.</div>' : `
+    ${a.mo?`<div><strong>Motivo:</strong> ${escapeHtmlHistorico(a.mo)}</div>`:''}
+    ${a.d===1&&a.st?`<div style="margin-top:2px"><strong>Estratégia:</strong> ${escapeHtmlHistorico(a.st)}</div>`:''}
+    ${a.gt?`<div style="margin-top:2px;color:#6d4c00"><strong>Gatilho para reavaliar:</strong> ${escapeHtmlHistorico(a.gt)}</div>`:''}
+    <div style="margin-top:3px">${faixa('HIS-1',a.h1)}${faixa('HIS-2',a.h2)}</div>
+    ${a.al!=null?`<div style="color:#555">Alvarás HIS 2023–24 ÷ vendas HIS compacto 12m: ${fx(a.al,2)}x</div>`:''}`}
+    ${linhaLote}
+    <div style="margin-top:3px;font-size:10px;color:#999">Estudo por área de ponderação (HIS-1 e HIS-2 até 35 m², 12 meses até set/26). O score ordena onde olhar primeiro; não promete venda — no backtest pesam mais a incorporadora e o tamanho do lançamento.</div>
+  </div>`;
 }
 // ── Camadas de transporte (linhas só para visualização; o que pontua é a estação) ──
 let _transporteDesenhado = false;
@@ -8570,9 +8673,9 @@ let currentProfile = 'alto'; // 'alto' | 'compacto'
 
 async function setProfile(p) {
   if (p === 'compacto') {
-    mostrarToast('Carregando a tese MCMV e as estações…');
+    mostrarToast('Carregando o estudo HIS compacto e as estações…');
     const ok = await carregarDadosMcmv();
-    if (!ok) { mostrarToast('Não consegui carregar os dados da tese MCMV. Tente de novo.'); return; }
+    if (!ok) { mostrarToast('Não consegui carregar o estudo HIS compacto e as estações (confira se pacotes_extra/his_compacto.json foi publicado).'); return; }
     desenharTransporte();
     const sel = document.getElementById('q-sort'); if (sel) sel.value = 'score';
     const ce = document.getElementById('ly-estacoes');
@@ -8933,7 +9036,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     <div class="score-box">
       <div class="score-lbl">Potencial de composição${_stats.dividido?' (pedaço separado por restrição ou zoneamento)':''}${_combo?' · combinado com vínculo':''}</div>
       <div class="score-num" style="color:#7b1fa2">${(_combo?_combo.area:_stats.area).toLocaleString('pt-BR')}<span style="font-size:13px;color:#aaa"> m²</span></div>
-      <div style="font-size:12px;color:#555;margin-top:4px">${(_combo?_combo.n:_stats.n)} lotes${_stats.dividido?` (de ${q.n} originais)`:''} · score ${_combo?_combo.score:_stats.score}${_combo?' <span style="font-size:10px;color:#aaa">(menor entre as vinculadas)</span>':''} <span style="font-size:11px;color:#aaa">(negociação: ${negSc(_stats.n)}/20 pts)</span></div>
+      <div style="font-size:12px;color:#555;margin-top:4px">${(_combo?_combo.n:_stats.n)} lotes${_stats.dividido?` (de ${q.n} originais)`:''} · score ${_combo?_combo.score:_stats.score}${_combo?' <span style="font-size:10px;color:#aaa">(menor entre as vinculadas)</span>':''} ${currentProfile==='compacto' ? '' : `<span style="font-size:11px;color:#aaa">(negociação: ${negSc(_stats.n)}/20 pts)</span>`}</div>
       <div class="score-track"><div class="score-fill" style="width:${Math.min(100,(_combo?_combo.area:_stats.area)/500)}%;background:#7b1fa2"></div></div>
       ${_combo?`<div style="font-size:10px;color:#888;margin-top:4px">Somado com ${_combo.membros-1} composiç${_combo.membros-1===1?'ão':'ões'} vinculada${_combo.membros-1===1?'':'s'} — score e preço de mercado usam o valor mais conservador (menor) entre elas.</div>`:''}
     </div>
@@ -9012,7 +9115,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <div class="dp-st">Composição do score — ${_stats.score} / 100</div>
       ${(()=>{
         const isCompacto = currentProfile==='compacto';
-        if (isCompacto && TESE_MCMV && TRANSPORTE) return htmlScoreMcmv(qz, _stats);
+        if (isCompacto && HIS_COMP && TRANSPORTE) return htmlScoreMcmv(qz, _stats);
         const zSc=ZONA_SC[qz.zona]||0;
         const gruposParaNegociacao = _combo ? _combo.gruposLotes : [{qidBase: q.id.split('-')[0], lotes: _stats.lotes}];
         const infoNegociacao = contarNegociacao(gruposParaNegociacao);
