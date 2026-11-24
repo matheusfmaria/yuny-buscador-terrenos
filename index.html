@@ -3385,6 +3385,7 @@ function atualizarFiltroNumerico(){
     qfilters.caMaxZonaMin = num('qf-camax-min', 0);
     qfilters.caMaxZonaMax = num('qf-camax-max', Infinity);
     _lerFiltrosMcmv();
+    if (currentProfile === 'compacto') _subExpCache.clear(); // as composições possíveis dependem dos filtros
     applyQFilters();
   }, 350);
 }
@@ -3642,14 +3643,115 @@ function _montarSubAtivo(q, qidBase, lotes, zona){
 // Invalidado explicitamente (limparCacheGetSubGroups) sempre que
 // STATUS_LOTE_CACHE muda — nunca fica desatualizado.
 let _subGroupsCache = new Map();
-function limparCacheGetSubGroups(){ _subGroupsCache.clear(); }
+let _subExpCache = new Map(); // perfil Econômico: composições "possíveis" dentro de grupos contíguos maiores (depende dos filtros)
+function limparCacheGetSubGroups(){ _subGroupsCache.clear(); _subExpCache.clear(); }
 function getSubGroups(q) {
   const _chaveCache = q.bairro+'::'+q.id;
-  const _cacheado = _subGroupsCache.get(_chaveCache);
-  if (_cacheado) return _cacheado;
-  const _resultado = _calcularSubGroups(q);
-  _subGroupsCache.set(_chaveCache, _resultado);
-  return _resultado;
+  let _base = _subGroupsCache.get(_chaveCache);
+  if (!_base) { _base = _calcularSubGroups(q); _subGroupsCache.set(_chaveCache, _base); }
+  if (currentProfile === 'compacto' && HIS_COMP && TRANSPORTE) return _expandirSubsCompacto(q, _base, _chaveCache);
+  return _base;
+}
+// ── PERFIL ECONÔMICO: composições possíveis dentro de um grupo contíguo maior ──
+// No Econômico não se precisa da maior área contígua: se dentro de um grupo existe
+// um conjunto de lotes vizinhos (até N lotes) com área entre o mínimo e o máximo
+// do filtro, ele aparece como composição. Escolhe-se, por grupo, as melhores
+// combinações SEM sobreposição (maior score primeiro), já respeitando os demais
+// filtros do perfil (esquina, frente, uso, estação, estudo).
+function _expandirSubsCompacto(q, subs, chave){
+  const cacheado = _subExpCache.get(chave);
+  if (cacheado) return cacheado;
+  const nMax = Number.isFinite(qfilters.nLotesMax) ? qfilters.nLotesMax : 3;
+  const aMin = qfilters.areaMin || 0, aMax = qfilters.areaMax;
+  let saida = subs;
+  if (subs.some(s => s.tipo==='ativo' && (s.n > nMax || s.area > aMax))) {
+    saida = [];
+    subs.forEach(s => {
+      if (s.tipo==='ativo' && (s.n > nMax || s.area > aMax)) {
+        const novos = _subsPossiveisCompacto(q, s, nMax, aMin, aMax);
+        if (novos.length) { novos.forEach(n => saida.push(n)); return; }
+      }
+      saida.push(s);
+    });
+  }
+  _subExpCache.set(chave, saida);
+  return saida;
+}
+function _candidatasCompacto(q, comp, nMax, aMin, aMax){
+  const qidBase = q.id.split('-')[0];
+  const edges = GRUPOS_EDGES[q.bairro+'::'+q.id] || [];
+  const lotes = comp.lotes, set = new Set(lotes);
+  const adj = {}; lotes.forEach(l => { adj[l] = []; });
+  edges.forEach(([a,b]) => { if (set.has(a) && set.has(b)) { adj[a].push(b); adj[b].push(a); } });
+  const areaDe = l => LOTES_AREA[`${qidBase}.${l}`] || 0;
+  const kMax = Math.min(nMax, 5);
+  // Com "apenas esquina" ligado, toda candidata precisa ter ao menos um lote de esquina:
+  // parte-se só deles (um conjunto conexo com um lote X sempre nasce de {X} + vizinhos).
+  let sementes = lotes;
+  if (qfilters.soEsquina) {
+    sementes = lotes.filter(l => { const a = IPTU_RAW[`${qidBase}.${l}`]; return a && (a[9]===1 || a[9]===6); });
+    if (!sementes.length) return [];
+  }
+  const esq = new Set(sementes);
+  const filtraEsq = qfilters.soEsquina;
+  const todos = []; // {c: lotes ordenados, area}
+  const poe = (c, area) => { if (area >= aMin && area <= aMax && (!filtraEsq || c.some(l => esq.has(l)))) todos.push({c: c.sort(), area: Math.round(area)}); };
+  if (kMax <= 3) {
+    // caminho rápido (padrão do Econômico: até 3 lotes): 1 lote, pares (arestas) e trios (caminhos/triângulos)
+    const adjS = {}; lotes.forEach(l => { adjS[l] = new Set(adj[l]); });
+    lotes.forEach(l => poe([l], areaDe(l)));
+    if (kMax >= 2) lotes.forEach(a => adj[a].forEach(b => { if (a < b) poe([a,b], areaDe(a)+areaDe(b)); }));
+    if (kMax >= 3) lotes.forEach(v => {
+      const viz = adj[v];
+      for (let x=0; x<viz.length; x++) for (let y=x+1; y<viz.length; y++) {
+        const u = viz[x], w = viz[y];
+        if (adjS[u].has(w) && !(v < u && v < w)) continue; // triângulo: gera uma vez só (pelo menor lote)
+        const area = areaDe(u)+areaDe(v)+areaDe(w);
+        if (area > aMax) continue;
+        poe([u,v,w], area);
+      }
+    });
+  } else {
+    let nivel = lotes.map(l => [l]);
+    const vistos = new Set(lotes);
+    for (let k = 2; k <= kMax && vistos.size < 20000; k++) {
+      const prox = [];
+      nivel.forEach(c => {
+        let ar = 0; c.forEach(l => { ar += areaDe(l); });
+        if (ar > aMax) return; // área só cresce: não adianta estender
+        const dentro = new Set(c);
+        c.forEach(l => adj[l].forEach(v => {
+          if (dentro.has(v)) return;
+          const novo = c.concat(v).sort();
+          const key = novo.join('|');
+          if (vistos.has(key)) return;
+          vistos.add(key); prox.push(novo);
+        }));
+      });
+      prox.forEach(c => { let ar = 0; c.forEach(l => { ar += areaDe(l); }); poe(c, ar); });
+      nivel = prox;
+    }
+    nivel = null; lotes.forEach(l => poe([l], areaDe(l)));
+  }
+  const cands = [];
+  todos.forEach(({c, area}) => {
+    if (!subPassaFiltrosMcmv(q, {lotes: c, n: c.length, area})) return;
+    cands.push({lotes: c, n: c.length, area, score: scoreMcmvDetalhe(q, area, c.length, c, true).total});
+  });
+  cands.sort((a,b) => b.score-a.score || a.n-b.n || b.area-a.area);
+  return cands;
+}
+function _subsPossiveisCompacto(q, comp, nMax, aMin, aMax){
+  const qidBase = q.id.split('-')[0];
+  const cands = _candidatasCompacto(q, comp, nMax, aMin, aMax);
+  const usados = new Set(), escolhidos = [];
+  cands.forEach(c => {
+    if (c.lotes.some(l => usados.has(l))) return;
+    c.lotes.forEach(l => usados.add(l));
+    const sub = _montarSubAtivo(q, qidBase, c.lotes, comp.zona); // score completo (com Terreno × VGV) só nas escolhidas
+    escolhidos.push({...sub, subId: `${q.id}~c${c.lotes.join('+')}`, dividido: true, virtual: true, nOriginal: comp.n, areaOriginal: comp.area});
+  });
+  return escolhidos;
 }
 function _calcularSubGroups(q) {
   const qidBase = q.id.split('-')[0];
@@ -3753,6 +3855,18 @@ function hullLatLngsForSub(sub) {
   return hull.map(p => [p[1], p[0]]);
 }
 // ── FIM SUBDIVISÃO DINÂMICA ─────────────────────────────────────────────
+// Alternativa (composição possível que NÃO foi a escolhida para o mapa): montada sob demanda a partir do subId
+function _resolverSubAlternativa(q, subId){
+  if (currentProfile !== 'compacto' || !q) return null;
+  const i = subId.indexOf('~c'); if (i < 0 || subId.slice(0, i) !== q.id) return null;
+  const lotes = subId.slice(i+2).split('+').filter(Boolean);
+  if (!lotes.length || lotes.some(l => !q.lotes.includes(l))) return null;
+  const qidBase = q.id.split('-')[0];
+  const base = (_subGroupsCache.get(q.bairro+'::'+q.id) || []).find(b => b.tipo==='ativo' && lotes.every(l => b.lotes.includes(l)));
+  if (!base) return null;
+  const sub = _montarSubAtivo(q, qidBase, lotes.slice().sort(), base.zona);
+  return {...sub, subId, dividido: true, virtual: true, nOriginal: base.n, areaOriginal: base.area};
+}
 function findSubById(subId, bairroHint) {
   const parentId = subId.split('~')[0];
   // Setor.quadra pode colidir entre bairros vizinhos (mesma numeração fiscal,
@@ -3762,7 +3876,7 @@ function findSubById(subId, bairroHint) {
     ? (QUADRAS.find(x=>x.id===parentId && x.bairro===bairroHint) || QUADRAS.find(x=>x.id===parentId))
     : QUADRAS.find(x=>x.id===parentId);
   if (!q) return null;
-  return getSubGroups(q).find(s=>s.subId===subId) || null;
+  return getSubGroups(q).find(s=>s.subId===subId) || _resolverSubAlternativa(q, subId) || null;
 }
 
 // Cor da composição restrita: cinza se só tem lotes "em obras"; um tom
@@ -7133,7 +7247,7 @@ function distritosMcmv(){
   const alvo = new Set(MCMV_DISTRITOS_NOMES.map(_semAcento));
   return DISTRITOS_DISPONIVEIS.filter(d => alvo.has(_semAcento(d.distrito))).map(d=>d.distrito);
 }
-let _mcmvCamaxAlto = null, _mcmvAreaAlto = null;
+let _mcmvCamaxAlto = null, _mcmvAreaAlto = null, _mcmvHideOuAlto = null;
 // Liga/desliga os padrões exclusivos do perfil MCMV (e restaura os do Alto padrão)
 function aplicarPadroesMcmv(ligar){
   const bloco = document.getElementById('bloco-mcmv-filtros');
@@ -7142,6 +7256,8 @@ function aplicarPadroesMcmv(ligar){
   const set = (id,v)=>{ const el=document.getElementById(id); if(el) el.value=v; };
   if (ligar) {
     if (_mcmvCamaxAlto === null && caMin) _mcmvCamaxAlto = caMin.value;
+    const ou = document.getElementById('q-hide-ou');
+    if (ou) { if (_mcmvHideOuAlto === null) _mcmvHideOuAlto = ou.checked; ou.checked = false; } // Econômico: não oculta Operação Urbana
     if (_mcmvAreaAlto === null) _mcmvAreaAlto = {min: document.getElementById('qf-area-min')?.value ?? '', max: document.getElementById('qf-area-max')?.value ?? ''};
     set('qf-camax-min','4'); set('qf-nlotes-max','3'); set('qf-est-raio','500');
     set('qf-area-min','1200'); set('qf-area-max','1800'); set('qf-frente-min','30');
@@ -7155,6 +7271,7 @@ function aplicarPadroesMcmv(ligar){
       caMin.value = _mcmvCamaxAlto; _mcmvCamaxAlto = null;
       qfilters.caMaxZonaMin = parseFloat(caMin.value)||0;
     }
+    if (_mcmvHideOuAlto !== null) { const ou = document.getElementById('q-hide-ou'); if (ou) ou.checked = _mcmvHideOuAlto; _mcmvHideOuAlto = null; }
     if (_mcmvAreaAlto !== null) {
       set('qf-area-min', _mcmvAreaAlto.min); set('qf-area-max', _mcmvAreaAlto.max); _mcmvAreaAlto = null;
       const n=(id,d)=>{const v=parseFloat(document.getElementById(id)?.value);return isNaN(v)?d:v;};
@@ -7228,7 +7345,7 @@ const PESOS_MCMV = {estudo:30, est:20, zon:8, lotes:12, terreno:10, area:5, fren
 const PTS_USO = {comercial:1, misto:0.65, vago:0.5, residencial:0}; // fração de PESOS_MCMV.uso
 // 1 lote = excelente, 2 = bom, 3 = razoável, acima disso zera
 const FRACAO_LOTES = n => n<=1 ? 1 : n===2 ? 0.7 : n===3 ? 0.4 : 0;
-function scoreMcmvDetalhe(q, area, n, lotes){
+function scoreMcmvDetalhe(q, area, n, lotes, rapido){
   const P = PESOS_MCMV;
   const ce = centroRapidoSub(q, lotes);
   const est = estacaoAtrativa(ce.lat, ce.lon);
@@ -7239,7 +7356,7 @@ function scoreMcmvDetalhe(q, area, n, lotes){
   const zon = Math.round((ZONA_MCMV[q.zona] || 0) * P.zon/10);
   const neg = Math.round(FRACAO_LOTES(n) * P.lotes);
   const are = janelaScore(Math.round(area), 1200, 1800, 800, 2600, P.area);
-  const ter = incidenciaTerrenoMcmv(q, area, lotes, estudo);
+  const ter = rapido ? {pts:7, incid:null} : incidenciaTerrenoMcmv(q, area, lotes, estudo); // rapido: ranking das candidatas, sem a avaliação por ITBI
   const terPts = Math.round(ter.pts * P.terreno/15);
   const frentePts = at.frente==null ? Math.round(P.frente/2) : Math.round(Math.max(0, Math.min(1, (at.frente-15)/30)) * P.frente);
   const esquinaPts = at.esquina ? P.esquina : 0;
@@ -7273,6 +7390,36 @@ function htmlScoreMcmv(q, stats){
       <div>${estTxt}</div>
       <div style="margin-top:4px;color:#6d4c00"><strong>Negociação:</strong> priorizar permuta (física ou financeira) ou dinheiro com fluxo alongado após a aprovação do projeto — por isso o score favorece proprietário único ou poucos.</div>
     </div>` + htmlEstudoHis(d);
+}
+// Outras combinações possíveis dentro do mesmo grupo contíguo (perfil Econômico)
+function htmlAlternativasCompacto(q, stats){
+  if (!stats.virtual) return '';
+  const base = (_subGroupsCache.get(q.bairro+'::'+q.id) || []).find(b => b.tipo==='ativo' && stats.lotes.every(l => b.lotes.includes(l)));
+  if (!base) return '';
+  const nMax = Number.isFinite(qfilters.nLotesMax) ? qfilters.nLotesMax : 3;
+  const qidBase = q.id.split('-')[0];
+  const noMapa = new Set(getSubGroups(q).filter(s => s.virtual).map(s => s.subId));
+  const cands = _candidatasCompacto(q, base, nMax, qfilters.areaMin||0, qfilters.areaMax).slice(0, 14)
+    .map(c => _montarSubAtivo(q, qidBase, c.lotes, base.zona))
+    .sort((a,b) => b.score-a.score || a.n-b.n || b.area-a.area);
+  if (cands.length < 2) return '';
+  const bairroJs = q.bairro.replace(/'/g, "\\'");
+  const linhas = cands.map(c => {
+    const id = `${q.id}~c${c.lotes.join('+')}`;
+    const atual = id === stats.subId;
+    const comp = c.lotes.some(l => stats.lotes.includes(l));
+    const at = atributosLotes(q, c.lotes);
+    const uso = ({comercial:'comercial',misto:'misto',residencial:'residencial',vago:'terreno vago'}[at.uso]||'uso s/ cadastro');
+    const marca = atual ? '<span style="color:#1b5e20;font-weight:700">● em exibição</span>' : noMapa.has(id) ? '<span style="color:#1565c0">● também no mapa</span>' : comp ? '<span style="color:#999">divide lotes com a atual</span>' : '';
+    return `<div style="padding:5px 6px;border-bottom:1px solid #eee;${atual?'background:#e8f5e9;':'cursor:pointer;'}" ${atual?'':`onclick="selectQuadra('${q.id}','${id}',true,'${bairroJs}')"`}>
+      <div style="display:flex;justify-content:space-between;gap:6px"><span style="font-family:monospace;font-size:11px">${c.lotes.join(' + ')}</span><strong>score ${c.score}</strong></div>
+      <div style="font-size:10.5px;color:#555">${Math.round(c.area).toLocaleString('pt-BR')} m² · frente ${at.frente!=null?at.frente.toLocaleString('pt-BR',{maximumFractionDigits:1})+' m':'—'} · ${at.esquina?'esquina':'sem esquina'} · ${uso}${marca?' · '+marca:''}</div></div>`;
+  }).join('');
+  return `<div style="margin-top:8px;padding:8px 10px;border:1px solid #e0e0e0;border-left:4px solid #1565c0;border-radius:6px;font-size:11.5px;background:#fafafa">
+    <div style="font-weight:700;margin-bottom:3px">Outras combinações possíveis neste grupo (${base.n} lotes · ${Math.round(base.area).toLocaleString('pt-BR')} m²)</div>
+    <div style="font-size:10px;color:#777;margin-bottom:4px">Mesmos filtros da aba (${(qfilters.areaMin||0).toLocaleString('pt-BR')}–${Number.isFinite(qfilters.areaMax)?qfilters.areaMax.toLocaleString('pt-BR'):'sem limite'} m², até ${nMax} lotes). As 14 de maior score; clique para abrir.</div>
+    ${linhas}
+  </div>`;
 }
 function htmlEstudoHis(d){
   const a = d.estudo, at = d.at;
@@ -8101,7 +8248,7 @@ function renderQuadraList() {
     return `
     <div class="qcard ${sel?'sel':''}" onclick="selectQuadra('${q.id}','${sub.subId}',false,'${q.bairro.replace(/'/g,"\\'")}')" style="${restrito?'opacity:0.75':''}">
       <div class="card-top">
-        <span class="card-id">Quadra ${sub.subId}${(PROSPECCAO_STATUS_CACHE[sub.subId] && sub.lotes.every(l=>PROSPECCAO_STATUS_CACHE[sub.subId].lotes.includes(l)))?' <span class="badge-prospeccao">📧 Pipeline</span>':''}${sub.dividido?(restrito?` <span style="font-size:9px;background:${corComposicaoRestrita(sub.parentId.split('-')[0],sub.lotes)};color:#fff;border-radius:3px;padding:1px 5px">${LABEL_RESTRICAO[sub.statusRestricao]||'restrito'}</span>`:` <span style="font-size:9px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 5px">parte ${sub.subId.split('~')[1]}</span>`):''}</span>
+        <span class="card-id">Quadra ${sub.virtual ? sub.parentId+' · lotes '+sub.lotes.join('+') : sub.subId}${(PROSPECCAO_STATUS_CACHE[sub.subId] && sub.lotes.every(l=>PROSPECCAO_STATUS_CACHE[sub.subId].lotes.includes(l)))?' <span class="badge-prospeccao">📧 Pipeline</span>':''}${sub.dividido?(restrito?` <span style="font-size:9px;background:${corComposicaoRestrita(sub.parentId.split('-')[0],sub.lotes)};color:#fff;border-radius:3px;padding:1px 5px">${LABEL_RESTRICAO[sub.statusRestricao]||'restrito'}</span>`:` <span style="font-size:9px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 5px">${sub.virtual ? 'combinação' : 'parte '+sub.subId.split('~')[1]}</span>`):''}</span>
         <span class="area-big">${(sub.area/1000).toFixed(1)}k m²</span>
       </div>
       <div class="card-meta">
@@ -8873,7 +9020,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
   }
   const subs = getSubGroups(q);
   if (subs.length===0) { closeDetail(); return; } // todos os lotes restritos, nada a mostrar
-  const activeSub = subs.find(s=>s.subId===subId) || subs[0];
+  const activeSub = subs.find(s=>s.subId===subId) || _resolverSubAlternativa(q, subId) || subs[0];
   selectedSubId = activeSub.subId;
   selectedBairro = q.bairro;
   const _stats = activeSub; // {area, n, score, vgv, lotes, subId, dividido, zona}
@@ -9006,7 +9153,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
   document.getElementById('detail').innerHTML=`
     <div class="detail-close" onclick="closeDetail()">✕ Fechar</div>
     <div class="dp-hd">
-      <div class="dp-sql">Quadra ${formatarQidExibicao(_stats.subId)}${_stats.dividido?` <span style="font-size:10px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 6px">parte ${_stats.subId.split('~')[1]}</span>`:''}</div>
+      <div class="dp-sql">Quadra ${formatarQidExibicao(_stats.subId)}${_stats.dividido?` <span style="font-size:10px;background:#5c6bc0;color:#fff;border-radius:3px;padding:1px 6px">${_stats.virtual ? 'combinação de '+_stats.n+(_stats.n===1?' lote':' lotes') : 'parte '+_stats.subId.split('~')[1]}</span>`:''}</div>
       <div class="dp-sub">${q.bairro} ${zonePill(qz.zona)}</div>
     </div>
     ${htmlAvisoDescarteAtivo(q.id)}
@@ -9034,7 +9181,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       </div>`;
     })()}
     <div class="score-box">
-      <div class="score-lbl">Potencial de composição${_stats.dividido?' (pedaço separado por restrição ou zoneamento)':''}${_combo?' · combinado com vínculo':''}</div>
+      <div class="score-lbl">Potencial de composição${_stats.virtual?' (combinação possível dentro de um grupo contíguo de '+_stats.nOriginal+' lotes / '+Math.round(_stats.areaOriginal).toLocaleString('pt-BR')+' m²)':_stats.dividido?' (pedaço separado por restrição ou zoneamento)':''}${_combo?' · combinado com vínculo':''}</div>
       <div class="score-num" style="color:#7b1fa2">${(_combo?_combo.area:_stats.area).toLocaleString('pt-BR')}<span style="font-size:13px;color:#aaa"> m²</span></div>
       <div style="font-size:12px;color:#555;margin-top:4px">${(_combo?_combo.n:_stats.n)} lotes${_stats.dividido?` (de ${q.n} originais)`:''} · score ${_combo?_combo.score:_stats.score}${_combo?' <span style="font-size:10px;color:#aaa">(menor entre as vinculadas)</span>':''} ${currentProfile==='compacto' ? '' : `<span style="font-size:11px;color:#aaa">(negociação: ${negSc(_stats.n)}/20 pts)</span>`}</div>
       <div class="score-track"><div class="score-fill" style="width:${Math.min(100,(_combo?_combo.area:_stats.area)/500)}%;background:#7b1fa2"></div></div>
@@ -9115,7 +9262,7 @@ function selectQuadra(qid, subId, manterView, bairroHint){
       <div class="dp-st">Composição do score — ${_stats.score} / 100</div>
       ${(()=>{
         const isCompacto = currentProfile==='compacto';
-        if (isCompacto && HIS_COMP && TRANSPORTE) return htmlScoreMcmv(qz, _stats);
+        if (isCompacto && HIS_COMP && TRANSPORTE) return htmlScoreMcmv(qz, _stats) + htmlAlternativasCompacto(q, _stats);
         const zSc=ZONA_SC[qz.zona]||0;
         const gruposParaNegociacao = _combo ? _combo.gruposLotes : [{qidBase: q.id.split('-')[0], lotes: _stats.lotes}];
         const infoNegociacao = contarNegociacao(gruposParaNegociacao);
