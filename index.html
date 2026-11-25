@@ -7388,6 +7388,82 @@ function ptsEstudoHis(a){
 }
 // Atributos do cadastro IPTU da composição: esquina, frente (soma das testadas) e uso
 const USOS_IPTU_RESIDENCIAL = new Set([2,3,5,7,8,14,32,33,34,37]); // inclui "predominância residencial"
+// ── Frente por face de rua ───────────────────────────────────────────
+// A "testada" do IPTU é por lote. Numa composição, lotes que dão pra ruas
+// diferentes (esquina) NÃO somam: a frente é a maior face. Descobrimos as
+// faces pela geometria: arestas de um lote que não encostam em outro lote da
+// quadra são arestas de rua; cada lote ganha o rumo da sua maior aresta de rua;
+// lotes vizinhos com rumo parecido (< 30°) ficam na mesma face e somam a testada.
+const _lotesQuadraBaseCache = new Map();
+function _lotesDaQuadraBase(q){
+  const qb = q.id.split('-')[0], k = q.bairro+'|'+qb;
+  let r = _lotesQuadraBaseCache.get(k);
+  if (r) return r;
+  const set = new Set(); QUADRAS.forEach(x => { if (x.bairro===q.bairro && x.id.split('-')[0]===qb) x.lotes.forEach(l=>set.add(l)); });
+  r = [...set]; _lotesQuadraBaseCache.set(k, r); return r;
+}
+function frentePorFaceDeRua(q, lotesFrente){
+  const qb = q.id.split('-')[0];
+  const todos = _lotesDaQuadraBase(q);
+  const cosL = Math.cos((q.lat||-23.5)*Math.PI/180);
+  const toM = c => [c[0]*cosL*111320, c[1]*111320];
+  const ring = {};
+  todos.forEach(l => { const g = LOTES_GEOM[qb+'.'+l]; if (g && g.length>=3) ring[l] = g.map(toM); });
+  function distPontoSeg(p,a,b){
+    const dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy;
+    let t = L2 ? ((p[0]-a[0])*dx+(p[1]-a[1])*dy)/L2 : 0; t = Math.max(0, Math.min(1, t));
+    return Math.hypot(p[0]-(a[0]+t*dx), p[1]-(a[1]+t*dy));
+  }
+  const TOL = 0.8; // m
+  // aresta (i,i+1) do lote l encosta em qual outro lote?
+  function vizinhoDaAresta(l, a, b){
+    const m = [(a[0]+b[0])/2, (a[1]+b[1])/2];
+    const q1 = [(a[0]*3+b[0])/4, (a[1]*3+b[1])/4], q3 = [(a[0]+b[0]*3)/4, (a[1]+b[1]*3)/4];
+    for (const o in ring) {
+      if (o === l) continue;
+      const R = ring[o]; let ok = [0,0,0];
+      for (let i=0;i<R.length-1;i++) {
+        const c = R[i], d = R[i+1];
+        if (distPontoSeg(m,c,d) < TOL) ok[0]=1;
+        if (distPontoSeg(q1,c,d) < TOL) ok[1]=1;
+        if (distPontoSeg(q3,c,d) < TOL) ok[2]=1;
+        if (ok[0]&&ok[1]&&ok[2]) return o;
+      }
+      if (ok[0] && (ok[1]||ok[2])) return o; // meia face encostada também conta
+    }
+    return null;
+  }
+  const info = {}; // lote -> {rumo, viz:Set}
+  lotesFrente.forEach(([l]) => {
+    const R = ring[l]; if (!R) return;
+    let best = 0, rumo = null; const viz = new Set();
+    let areaAss = 0; for (let i=0;i<R.length-1;i++) areaAss += R[i][0]*R[i+1][1]-R[i+1][0]*R[i][1];
+    const sinal = areaAss >= 0 ? 1 : -1; // anti-horário => normal externa à direita da aresta
+    for (let i=0;i<R.length-1;i++) {
+      const a = R[i], b = R[i+1], len = Math.hypot(b[0]-a[0], b[1]-a[1]);
+      if (len < 0.5) continue;
+      const v = vizinhoDaAresta(l, a, b);
+      if (v) { viz.add(v); continue; }
+      if (len > best) { best = len; // direção da normal EXTERNA (0–360): fachadas opostas, mesmo paralelas, são faces diferentes
+        const nx = sinal*(b[1]-a[1]), ny = -sinal*(b[0]-a[0]);
+        rumo = (Math.atan2(ny, nx)*180/Math.PI + 360) % 360; }
+    }
+    info[l] = {rumo, viz};
+  });
+  if (lotesFrente.some(([l]) => !info[l])) return null; // sem geometria: mantém a soma
+  const dRumo = (a,b) => { let d = Math.abs(a-b)%360; return d>180 ? 360-d : d; };
+  const pai = {}; lotesFrente.forEach(([l]) => pai[l]=l);
+  const raiz = x => pai[x]===x ? x : (pai[x]=raiz(pai[x]));
+  for (let i=0;i<lotesFrente.length;i++) for (let j=i+1;j<lotesFrente.length;j++) {
+    const A = lotesFrente[i][0], B = lotesFrente[j][0], a = info[A], b = info[B];
+    const vizinhos = a.viz.has(B) || b.viz.has(A);
+    const mesmaFace = a.rumo==null || b.rumo==null || dRumo(a.rumo, b.rumo) < 30;
+    if (vizinhos && mesmaFace) pai[raiz(A)] = raiz(B);
+  }
+  const soma = {}; lotesFrente.forEach(([l,t]) => { const r = raiz(l); soma[r] = (soma[r]||0)+t; });
+  const vals = Object.values(soma);
+  return {maior: Math.max(...vals), nFaces: vals.length};
+}
 function atributosLotes(q, lotes){
   const qb = q.id.split('-')[0];
   const chave = qb+'|'+(lotes||[]).join(',');
@@ -7395,12 +7471,13 @@ function atributosLotes(q, lotes){
   if (r) return r;
   let frente = 0, temFrente = false, esquina = false, nRes = 0, nNres = 0, nVago = 0, semCad = 0;
   const esquinaLotes = [], usosTxt = new Set();
+  const lotesFrente = []; // [lote, testada] dos lotes que dão frente
   (lotes||[]).forEach(l => {
     const a = IPTU_RAW[qb+'.'+l];
     if (!a) { semCad++; return; }
     const tt = a[9];
     if (tt===1 || tt===6) { esquina = true; esquinaLotes.push(l); }
-    if (a[6] > 0 && tt!==3 && tt!==4 && tt!==5) { frente += a[6]; temFrente = true; } // fundos / interno / encravado não dão frente
+    if (a[6] > 0 && tt!==3 && tt!==4 && tt!==5) { frente += a[6]; temFrente = true; lotesFrente.push([l, a[6]]); } // fundos / interno / encravado não dão frente
     const uso = a[7];
     if (uso===9 || !(a[0] > 0)) nVago++;
     else if (USOS_IPTU_RESIDENCIAL.has(uso)) nRes++;
@@ -7408,7 +7485,13 @@ function atributosLotes(q, lotes){
     if (uso >= 0 && IPTU_USOS[uso]) usosTxt.add(IPTU_USOS[uso]);
   });
   const uso = nRes && nNres ? 'misto' : nNres ? 'comercial' : nRes ? 'residencial' : nVago ? 'vago' : null;
-  r = {frente: temFrente ? frente : null, esquina, esquinaLotes, uso, semCad, usosTxt: [...usosTxt]};
+  // Composição com face para mais de uma rua: vale a MAIOR frente (não a soma das ruas)
+  let nFaces = 1;
+  if (temFrente && lotesFrente.length > 1) {
+    try { const f = frentePorFaceDeRua(q, lotesFrente); if (f) { frente = f.maior; nFaces = f.nFaces; } }
+    catch(e) { console.warn('Frente por face de rua falhou, mantendo a soma:', e); }
+  }
+  r = {frente: temFrente ? frente : null, nFaces, esquina, esquinaLotes, uso, semCad, usosTxt: [...usosTxt]};
   _atribLotesCache.set(chave, r);
   return r;
 }
@@ -7497,7 +7580,7 @@ function htmlScoreMcmv(q, stats){
     scoreBar('Terreno × VGV'+(d.ter.incid!=null?' (incidência '+(d.ter.incid*100).toFixed(0)+'% do VGV)':' (sem avaliação)'), d.terPts, PESOS_MCMV.terreno),
     scoreBar('Área da composição (ideal 1.200–1.800 m²)', d.are, PESOS_MCMV.area),
     scoreBar('Regularidade do formato'+(d.reg?' ('+Math.round(d.reg.rect*100)+'% do retângulo envolvente · proporção 1:'+(d.reg.lado1/d.reg.lado2).toFixed(1).replace('.',',')+')':' (sem geometria)'), d.regPts, PESOS_MCMV.regular),
-    scoreBar('Frente'+(d.at.frente!=null?' ('+d.at.frente.toLocaleString('pt-BR',{maximumFractionDigits:1})+' m)':' (sem testada cadastrada)'), d.frentePts, PESOS_MCMV.frente),
+    scoreBar('Frente'+(d.at.frente!=null?' ('+d.at.frente.toLocaleString('pt-BR',{maximumFractionDigits:1})+' m'+(d.at.nFaces>1?' · maior de '+d.at.nFaces+' faces':'')+')':' (sem testada cadastrada)'), d.frentePts, PESOS_MCMV.frente),
     scoreBar('Imóvel em esquina'+(d.at.esquina?' (sim)':' (não)'), d.esquinaPts, PESOS_MCMV.esquina),
     scoreBar('Uso do imóvel ('+({comercial:'comercial / não residencial',misto:'misto',residencial:'residencial',vago:'terreno vago'}[d.at.uso]||'sem cadastro')+')', d.usoPts, PESOS_MCMV.uso),
   ].join('') + `
@@ -7541,7 +7624,7 @@ function htmlEstudoHis(d){
   const a = d.estudo, at = d.at;
   const fm = v=>v==null?'—':Math.round(v).toLocaleString('pt-BR');
   const fx = (v,dec)=>v==null?'—':v.toLocaleString('pt-BR',{minimumFractionDigits:dec,maximumFractionDigits:dec});
-  const linhaLote = `<div style="margin-top:3px;color:#555"><strong>Cadastro IPTU:</strong> frente ${at.frente!=null?fx(at.frente,1)+' m':'sem testada'} · ${at.esquina?'esquina (lote '+at.esquinaLotes.join(', ')+')':'não é esquina'} · uso ${({comercial:'comercial / não residencial',misto:'misto',residencial:'residencial',vago:'terreno vago'}[at.uso]||'sem cadastro')}${at.usosTxt.length?' — '+at.usosTxt.map(escapeHtmlHistorico).join('; '):''}</div>`;
+  const linhaLote = `<div style="margin-top:3px;color:#555"><strong>Cadastro IPTU:</strong> frente ${at.frente!=null?fx(at.frente,1)+' m'+(at.nFaces>1?' (maior de '+at.nFaces+' faces)':''):'sem testada'} · ${at.esquina?'esquina (lote '+at.esquinaLotes.join(', ')+')':'não é esquina'} · uso ${({comercial:'comercial / não residencial',misto:'misto',residencial:'residencial',vago:'terreno vago'}[at.uso]||'sem cadastro')}${at.usosTxt.length?' — '+at.usosTxt.map(escapeHtmlHistorico).join('; '):''}</div>`;
   if (!HIS_COMP) return `<div style="margin-top:8px;padding:8px 10px;border:1px solid #e0e0e0;border-left:4px solid #757575;border-radius:6px;font-size:11.5px;background:#fafafa"><div style="font-weight:700">Estudo HIS compacto</div><div>Pacote do estudo (his_compacto.json) não foi carregado.</div>${linhaLote}</div>`;
   if (!a) return `<div style="margin-top:8px;padding:8px 10px;border:1px solid #e0e0e0;border-left:4px solid #757575;border-radius:6px;font-size:11.5px;background:#fafafa"><div style="font-weight:700">Estudo HIS compacto · fora das áreas mapeadas</div>${linhaLote}</div>`;
   const cl = estudoClasse(a);
