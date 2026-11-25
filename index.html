@@ -609,14 +609,17 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
           <div class="fl" style="margin-top:0;color:#1b5e20">Econômico · MCMV</div>
           <div class="fl">Estudo HIS compacto (região)</div>
           <label class="check-row"><input type="checkbox" id="qf-estudo-LANCAR" checked onchange="atualizarFiltroNumerico()"> 🟩 Lançar</label>
-          <label class="check-row"><input type="checkbox" id="qf-estudo-MONITORAR" checked onchange="atualizarFiltroNumerico()"> 🟨 Monitorar</label>
-          <label class="check-row"><input type="checkbox" id="qf-estudo-IGNORAR" checked onchange="atualizarFiltroNumerico()"> 🟥 Ignorar</label>
-          <label class="check-row"><input type="checkbox" id="qf-estudo-SEM_DADO" checked onchange="atualizarFiltroNumerico()"> ⬜ Sem HIS compacto na região</label>
+          <label class="check-row"><input type="checkbox" id="qf-estudo-MONITORAR" onchange="atualizarFiltroNumerico()"> 🟨 Monitorar</label>
+          <label class="check-row"><input type="checkbox" id="qf-estudo-IGNORAR" onchange="atualizarFiltroNumerico()"> 🟥 Ignorar</label>
+          <label class="check-row"><input type="checkbox" id="qf-estudo-SEM_DADO" onchange="atualizarFiltroNumerico()"> ⬜ Sem HIS compacto na região</label>
           <div class="fl">Máx. de lotes na composição</div>
-          <div class="minmax-row"><input type="number" id="qf-nlotes-max" min="1" step="1" placeholder="Máx" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
+          <div class="minmax-row"><input type="number" id="qf-nlotes-max" value="1" min="1" step="1" placeholder="Máx" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
           <div class="fl">Frente mínima da composição (m)</div>
           <div class="minmax-row"><input type="number" id="qf-frente-min" min="0" step="1" placeholder="Mín" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
           <div style="font-size:9.5px;color:#888;line-height:1.4;margin-bottom:4px">Soma da testada (cadastro IPTU) dos lotes que dão frente para a rua; lote sem testada cadastrada não é excluído.</div>
+          <div class="fl">Regularidade mínima do formato (%)</div>
+          <div class="minmax-row"><input type="number" id="qf-reg-min" min="0" max="100" step="5" placeholder="Ex.: 60" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
+          <div style="font-size:9.5px;color:#888;line-height:1.4;margin-bottom:4px">100% = quadrado. Mede o quanto a composição preenche o menor retângulo que a envolve e o quanto é comprida. Em branco = sem filtro (a regularidade sempre pesa no score).</div>
           <label class="check-row"><input type="checkbox" id="qf-esquina" checked onchange="atualizarFiltroNumerico()"> Apenas imóveis em esquina</label>
           <div class="fl">Uso do imóvel (cadastro IPTU)</div>
           <label class="check-row"><input type="checkbox" id="qf-uso-comercial" checked onchange="atualizarFiltroNumerico()"> 🏬 Comercial / não residencial</label>
@@ -3359,7 +3362,7 @@ let qfilters={
   precoMin:0, precoMax:Infinity,   // R$/m²
   caMin:0, caMax:Infinity,
   nLotesMax:Infinity, estRaio:Infinity, estModo:'todos', estFuturas:false, // só valem no perfil MCMV
-  frenteMin:0, soEsquina:false, usoClasses:null, estudoClasses:null, // idem (estudo HIS compacto, 23/11/2026)
+  frenteMin:0, regMin:0, soEsquina:false, usoClasses:null, estudoClasses:null, // idem (estudo HIS compacto, 23/11/2026)
   caMaxZonaMin:2, caMaxZonaMax:Infinity,  // CA máx do zoneamento: padrão 2 (abaixo disso não há potencial de incorporação)
 };
 // Lê os 10 campos de min/máx de uma vez e reaplica os filtros — com um
@@ -3396,6 +3399,7 @@ function _lerFiltrosMcmv(){
   qfilters.estModo = document.querySelector('input[name="qf-est-modo"]:checked')?.value || 'todos';
   qfilters.estFuturas = !!document.getElementById('qf-est-futuras')?.checked;
   qfilters.frenteMin = num('qf-frente-min', 0);
+  qfilters.regMin = num('qf-reg-min', 0);
   qfilters.soEsquina = !!document.getElementById('qf-esquina')?.checked;
   const usos = ['comercial','misto','residencial','vago'].filter(c => document.getElementById('qf-uso-'+c)?.checked);
   qfilters.usoClasses = usos.length && usos.length < 4 ? new Set(usos) : null;
@@ -7228,6 +7232,10 @@ function subPassaFiltrosMcmv(q, sub){
     const c = centroRapidoSub(q, sub.lotes);
     if (!qfilters.estudoClasses.has(estudoClasse(areaHisDoPonto(c.lat, c.lon)))) return false;
   }
+  if (qfilters.regMin > 0) {
+    const rg = regularidadeLotes(q.id.split('-')[0], sub.lotes);
+    if (rg && rg.idx*100 < qfilters.regMin) return false;
+  }
   if (qfilters.frenteMin > 0 || qfilters.soEsquina || qfilters.usoClasses) {
     const at = atributosLotes(q, sub.lotes);
     if (qfilters.soEsquina && !at.esquina) return false;
@@ -7259,11 +7267,11 @@ function aplicarPadroesMcmv(ligar){
     const ou = document.getElementById('q-hide-ou');
     if (ou) { if (_mcmvHideOuAlto === null) _mcmvHideOuAlto = ou.checked; ou.checked = false; } // Econômico: não oculta Operação Urbana
     if (_mcmvAreaAlto === null) _mcmvAreaAlto = {min: document.getElementById('qf-area-min')?.value ?? '', max: document.getElementById('qf-area-max')?.value ?? ''};
-    set('qf-camax-min','4'); set('qf-nlotes-max','3'); set('qf-est-raio','500');
-    set('qf-area-min','1200'); set('qf-area-max','1800'); set('qf-frente-min','30');
+    set('qf-camax-min','4'); set('qf-nlotes-max','1'); set('qf-est-raio','500');
+    set('qf-area-min','1200'); set('qf-area-max','1800'); set('qf-frente-min','30'); set('qf-reg-min','');
     const esq=document.getElementById('qf-esquina'); if(esq) esq.checked=true;
     ['comercial','misto','residencial','vago'].forEach(c=>{ const el=document.getElementById('qf-uso-'+c); if(el) el.checked=true; });
-    ['LANCAR','MONITORAR','IGNORAR','SEM_DADO'].forEach(c=>{ const el=document.getElementById('qf-estudo-'+c); if(el) el.checked=true; });
+    ['LANCAR','MONITORAR','IGNORAR','SEM_DADO'].forEach(c=>{ const el=document.getElementById('qf-estudo-'+c); if(el) el.checked = (c==='LANCAR'); });
     const r=document.querySelector('input[name="qf-est-modo"][value="todos"]'); if(r) r.checked=true;
     const f=document.getElementById('qf-est-futuras'); if(f) f.checked=false;
   } else {
@@ -7341,7 +7349,48 @@ function atributosLotes(q, lotes){
   return r;
 }
 // Pesos do score do perfil (somam 100) — ajustar só aqui
-const PESOS_MCMV = {estudo:30, est:20, zon:8, lotes:12, terreno:10, area:5, frente:5, esquina:4, uso:6};
+const PESOS_MCMV = {estudo:26, est:18, regular:10, lotes:12, terreno:8, zon:8, uso:6, area:4, frente:4, esquina:4};
+// ── Regularidade do formato (pedido de 25/11/2026): quanto mais próxima de um quadrado, melhor ──
+// Índice = (área dos lotes ÷ área do menor retângulo que os envolve) × √(lado menor ÷ lado maior).
+// Quadrado/retângulo cheio ≈ 1; L, T e formas recortadas caem pelo 1º fator; faixas compridas, pelo 2º.
+const _regCache = new Map();
+function regularidadeLotes(qidBase, lotes){
+  const chave = qidBase+'|'+(lotes||[]).join(',');
+  if (_regCache.has(chave)) return _regCache.get(chave);
+  let r = null;
+  try {
+    const rings = (lotes||[]).map(l => LOTES_GEOM[qidBase+'.'+l]).filter(g => g && g.length >= 3);
+    if (rings.length === (lotes||[]).length && rings.length) {
+      const lat0 = rings[0][0][1], lon0 = rings[0][0][0];
+      const kx = 111320*Math.cos(lat0*Math.PI/180), ky = 110574;
+      let areaLotes = 0, pts = [];
+      rings.forEach(g => {
+        const m = g.map(p => [(p[0]-lon0)*kx, (p[1]-lat0)*ky]);
+        let a = 0; for (let i=0, j=m.length-1; i<m.length; j=i++) a += (m[j][0]*m[i][1]) - (m[i][0]*m[j][1]);
+        areaLotes += Math.abs(a)/2; pts = pts.concat(m);
+      });
+      const hull = convexHull(pts); // [[x,y],...] em metros
+      let melhor = null;
+      for (let i=0; i<hull.length; i++) {
+        const a = hull[i], b = hull[(i+1)%hull.length];
+        const ang = Math.atan2(b[1]-a[1], b[0]-a[0]), c = Math.cos(-ang), sn = Math.sin(-ang);
+        let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+        hull.forEach(p => { const x = p[0]*c - p[1]*sn, y = p[0]*sn + p[1]*c; if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y; });
+        const w = x1-x0, h = y1-y0, ar = w*h;
+        if (!melhor || ar < melhor.ar) melhor = {ar, w, h};
+      }
+      if (melhor && melhor.ar > 0) {
+        const rect = Math.min(1, areaLotes/melhor.ar);
+        const aspecto = Math.min(melhor.w, melhor.h)/Math.max(melhor.w, melhor.h);
+        r = {idx: rect*Math.sqrt(aspecto), rect, aspecto, lado1: Math.max(melhor.w, melhor.h), lado2: Math.min(melhor.w, melhor.h)};
+      }
+    }
+  } catch(e) { r = null; }
+  _regCache.set(chave, r);
+  return r;
+}
+// 0,35 (muito irregular/comprido) → 0 pt;  0,90 (quase quadrado) → pontos cheios
+const ptsRegularidade = (r, max) => r ? Math.round(Math.max(0, Math.min(1, (r.idx-0.35)/(0.90-0.35))) * max) : Math.round(max/2);
 const PTS_USO = {comercial:1, misto:0.65, vago:0.5, residencial:0}; // fração de PESOS_MCMV.uso
 // 1 lote = excelente, 2 = bom, 3 = razoável, acima disso zera
 const FRACAO_LOTES = n => n<=1 ? 1 : n===2 ? 0.7 : n===3 ? 0.4 : 0;
@@ -7360,9 +7409,11 @@ function scoreMcmvDetalhe(q, area, n, lotes, rapido){
   const terPts = Math.round(ter.pts * P.terreno/15);
   const frentePts = at.frente==null ? Math.round(P.frente/2) : Math.round(Math.max(0, Math.min(1, (at.frente-15)/30)) * P.frente);
   const esquinaPts = at.esquina ? P.esquina : 0;
+  const reg = regularidadeLotes(q.id.split('-')[0], lotes);
+  const regPts = ptsRegularidade(reg, P.regular);
   const usoPts = at.uso ? Math.round((PTS_USO[at.uso]||0) * P.uso) : Math.round(P.uso/3);
-  const total = Math.min(100, estudoPts+estPts+zon+neg+are+terPts+frentePts+esquinaPts+usoPts);
-  return {est, estudo, at, estudoPts, estPts, zon, neg, are, ter, terPts, frentePts, esquinaPts, usoPts, total};
+  const total = Math.min(100, estudoPts+estPts+zon+neg+are+terPts+frentePts+esquinaPts+usoPts+regPts);
+  return {est, estudo, at, estudoPts, estPts, zon, neg, are, ter, terPts, frentePts, esquinaPts, usoPts, reg, regPts, total};
 }
 function scoreMcmv(q, area, n, lotes){
   if (n === 0) return 0;
@@ -7381,6 +7432,7 @@ function htmlScoreMcmv(q, stats){
     scoreBar('Nº de lotes ('+nTxt+')', d.neg, PESOS_MCMV.lotes),
     scoreBar('Terreno × VGV'+(d.ter.incid!=null?' (incidência '+(d.ter.incid*100).toFixed(0)+'% do VGV)':' (sem avaliação)'), d.terPts, PESOS_MCMV.terreno),
     scoreBar('Área da composição (ideal 1.200–1.800 m²)', d.are, PESOS_MCMV.area),
+    scoreBar('Regularidade do formato'+(d.reg?' ('+Math.round(d.reg.rect*100)+'% do retângulo envolvente · proporção 1:'+(d.reg.lado1/d.reg.lado2).toFixed(1).replace('.',',')+')':' (sem geometria)'), d.regPts, PESOS_MCMV.regular),
     scoreBar('Frente'+(d.at.frente!=null?' ('+d.at.frente.toLocaleString('pt-BR',{maximumFractionDigits:1})+' m)':' (sem testada cadastrada)'), d.frentePts, PESOS_MCMV.frente),
     scoreBar('Imóvel em esquina'+(d.at.esquina?' (sim)':' (não)'), d.esquinaPts, PESOS_MCMV.esquina),
     scoreBar('Uso do imóvel ('+({comercial:'comercial / não residencial',misto:'misto',residencial:'residencial',vago:'terreno vago'}[d.at.uso]||'sem cadastro')+')', d.usoPts, PESOS_MCMV.uso),
@@ -7413,7 +7465,7 @@ function htmlAlternativasCompacto(q, stats){
     const marca = atual ? '<span style="color:#1b5e20;font-weight:700">● em exibição</span>' : noMapa.has(id) ? '<span style="color:#1565c0">● também no mapa</span>' : comp ? '<span style="color:#999">divide lotes com a atual</span>' : '';
     return `<div style="padding:5px 6px;border-bottom:1px solid #eee;${atual?'background:#e8f5e9;':'cursor:pointer;'}" ${atual?'':`onclick="selectQuadra('${q.id}','${id}',true,'${bairroJs}')"`}>
       <div style="display:flex;justify-content:space-between;gap:6px"><span style="font-family:monospace;font-size:11px">${c.lotes.join(' + ')}</span><strong>score ${c.score}</strong></div>
-      <div style="font-size:10.5px;color:#555">${Math.round(c.area).toLocaleString('pt-BR')} m² · frente ${at.frente!=null?at.frente.toLocaleString('pt-BR',{maximumFractionDigits:1})+' m':'—'} · ${at.esquina?'esquina':'sem esquina'} · ${uso}${marca?' · '+marca:''}</div></div>`;
+      <div style="font-size:10.5px;color:#555">${Math.round(c.area).toLocaleString('pt-BR')} m² · formato ${(()=>{const r=regularidadeLotes(qidBase,c.lotes);return r?Math.round(r.idx*100)+'%':'—'})()} · frente ${at.frente!=null?at.frente.toLocaleString('pt-BR',{maximumFractionDigits:1})+' m':'—'} · ${at.esquina?'esquina':'sem esquina'} · ${uso}${marca?' · '+marca:''}</div></div>`;
   }).join('');
   return `<div style="margin-top:8px;padding:8px 10px;border:1px solid #e0e0e0;border-left:4px solid #1565c0;border-radius:6px;font-size:11.5px;background:#fafafa">
     <div style="font-weight:700;margin-bottom:3px">Outras combinações possíveis neste grupo (${base.n} lotes · ${Math.round(base.area).toLocaleString('pt-BR')} m²)</div>
