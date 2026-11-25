@@ -6184,16 +6184,47 @@ function iniciarCapturaMapa(){
   // temos, sem depender de nenhum servidor externo na hora da captura,
   // o contorno sai corretamente na imagem.
   function _desenharLotesDeFundoNaCaptura(qQuadra, qidBaseDesenho){
-    if (!qQuadra) return;
-    qQuadra.lotes.forEach(l => {
-      const ring = LOTES_GEOM[`${qidBaseDesenho}.${l}`];
-      if (!ring || ring.length < 3) return;
-      L.polygon(ring.map(c=>[c[1],c[0]]), {
-        renderer: rend, color: '#78502e', weight: 1, opacity: 0.6,
-        fill: false, interactive: false
-      }).addTo(grupo);
-    });
+    // Mantido por compatibilidade: agora todos os lotes do entorno são
+    // desenhados por _redesenharLotesGeosampaCaptura (abaixo).
   }
+  // Camada de lotes "estilo GeoSampa" (amarelo + contorno laranja + nº do
+  // lote), desenhada com a nossa geometria — o WMS da prefeitura não libera
+  // CORS e não dá pra copiar os pixels dele pra dentro da imagem final.
+  const rendFundo = L.canvas({padding:0.6});
+  const grupoFundo = L.featureGroup().addTo(map);
+  _captura.layerFundo = grupoFundo;
+  _captura.rotulos = [];
+  function _redesenharLotesGeosampaCaptura(){
+    grupoFundo.clearLayers();
+    _captura.rotulos = [];
+    const z = map.getZoom();
+    if (z < 16) return;
+    const bd = map.getBounds().pad(0.35);
+    const m = 0.004; // folga (graus) pra quadras grandes cujo ponto central está fora da tela
+    const vistos = new Set(); let n = 0;
+    for (const qq of QUADRAS) {
+      if (qq.lat < bd.getSouth()-m || qq.lat > bd.getNorth()+m || qq.lon < bd.getWest()-m || qq.lon > bd.getEast()+m) continue;
+      const base = qq.id.split('-')[0];
+      for (const l of qq.lotes) {
+        const key = `${base}.${l}`;
+        if (vistos.has(key)) continue; vistos.add(key);
+        const ring = LOTES_GEOM[key];
+        if (!ring || ring.length < 3) continue;
+        if (++n > 3500) break;
+        L.polygon(ring.map(c=>[c[1],c[0]]), {
+          renderer: rendFundo, color: '#e8590c', weight: 1.1, opacity: 0.9,
+          fillColor: '#f7c948', fillOpacity: 0.38, interactive: false
+        }).addTo(grupoFundo);
+        let sx=0, sy=0; ring.forEach(c=>{ sx+=c[0]; sy+=c[1]; });
+        _captura.rotulos.push({lat: sy/ring.length, lon: sx/ring.length, txt: String(l)});
+        if (z >= 18) L.marker([sy/ring.length, sx/ring.length], {interactive:false, keyboard:false, icon:L.divIcon({className:'', iconSize:[0,0], html:`<div style="transform:translate(-50%,-50%);font:bold 11px sans-serif;color:#5a2d00;text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 3px #fff;white-space:nowrap">${l}</div>`})}).addTo(grupoFundo);
+      }
+    }
+  }
+  _captura.redesenharFundo = _redesenharLotesGeosampaCaptura;
+  _captura.onMove = () => { if (_captura) _redesenharLotesGeosampaCaptura(); };
+  map.on('moveend zoomend', _captura.onMove);
+  _redesenharLotesGeosampaCaptura();
   _desenharLotesDeFundoNaCaptura(q, qidBase);
 
   function _desenharComposicaoNaCaptura(qidBaseDesenho, lotesDesenho){
@@ -6285,6 +6316,8 @@ function sairModoCaptura(voltarAoModal){
       if (estavaNoMapa) { basemapMapa.addTo(map); _vigiarOpenFreeMap(basemapMapa); }
     }
     if (_captura.layer) map.removeLayer(_captura.layer);
+    if (_captura.layerFundo) map.removeLayer(_captura.layerFundo);
+    if (_captura.onMove) map.off('moveend zoomend', _captura.onMove);
     _captura.ativas.forEach(n => { if (layers[n]) layers[n].addTo(map); });
     if (_captura.tinhaLotes && lotesLayer) lotesLayer.addTo(map);
     if (_captura.tinhaBusca && typeof searchMarker !== 'undefined' && searchMarker) searchMarker.addTo(map);
@@ -6385,6 +6418,20 @@ function _renderizarMapaParaCanvas(mapEl, rect, escala){
     if (!r.width || !r.height) return;
     try { ctx.drawImage(c, r.left-rect.left, r.top-rect.top, r.width, r.height); } catch(e){}
   });
+
+  // Nº dos lotes (camada estilo GeoSampa), em zoom de detalhe
+  if (typeof _captura !== 'undefined' && _captura && _captura.rotulos && map.getZoom() >= 18) {
+    ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round'; ctx.lineWidth = 3;
+    _captura.rotulos.forEach(r => {
+      const p = map.latLngToContainerPoint([r.lat, r.lon]);
+      const mapRect = mapEl.getBoundingClientRect();
+      const x = p.x + mapRect.left - rect.left, y = p.y + mapRect.top - rect.top;
+      if (x < -20 || y < -20 || x > rect.width+20 || y > rect.height+20) return;
+      ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.strokeText(r.txt, x, y);
+      ctx.fillStyle = '#5a2d00'; ctx.fillText(r.txt, x, y);
+    });
+  }
 
   return out;
 }
@@ -8771,6 +8818,15 @@ function encerrarMedicao(){
 // prospecção — ver mais acima. Não tem mais botão separado na ficha pra
 // isso (era "📤 Enviar pro LandBank"): faz parte do fluxo Outlook →
 // Pipeline → Concluído, todo dentro do mesmo modal.
+// Centro da composição ativa (e não o centro da quadra inteira — em quadras
+// grandes o ponto da quadra fica a centenas de metros do lote analisado).
+function _centroFicha(q, st){
+  try {
+    const c = centroDaComposicao(q.id.split('-')[0], st);
+    if (c && isFinite(c.lat) && isFinite(c.lon)) return c;
+  } catch(e) {}
+  return {lat:q.lat, lon:q.lon};
+}
 function abrirGoogleMaps(lat, lon){
   window.open(`https://www.google.com/maps/search/?api=1&query=${lat},${lon}`, '_blank');
 }
@@ -9182,9 +9238,9 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     </div>
     ${htmlAvisoDescarteAtivo(q.id)}
     <div class="actions" style="padding-bottom:0">
-      <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
-      <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
-      <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
+      <button class="act-btn" onclick="abrirGoogleMaps(${_centroFicha(q,_stats).lat}, ${_centroFicha(q,_stats).lon})">📍 Ver no Google Maps</button>
+      <button class="act-btn" onclick="abrirGoogleEarth(${_centroFicha(q,_stats).lat}, ${_centroFicha(q,_stats).lon})">🌐 Ver no Google Earth</button>
+      <button class="act-btn" onclick="abrirGeosampa(${_centroFicha(q,_stats).lat}, ${_centroFicha(q,_stats).lon})">🗺️ Ver no Geosampa</button>
       <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção e/ou Pipeline</button>
       <button class="act-btn" style="border-color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#90a4ae'};color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#607d8b'}" onclick='toggleValidacaoAleUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${VALIDACAO_ALE_CACHE[_stats.subId]?"↩️ Remover validação com o Ale":"✅ Validar com o Ale"}</button>
       <button class="act-btn" style="border-color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#90a4ae'};color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#607d8b'}" onclick='toggleBaixaPrioridadeUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${BAIXA_PRIORIDADE_CACHE[_stats.subId]?"↩️ Remover baixa prioridade":"🔽 Baixa prioridade"}</button>
@@ -9227,9 +9283,9 @@ function selectQuadra(qid, subId, manterView, bairroHint){
     </div>
     ${htmlAvisoDescarteAtivo(q.id)}
     <div class="actions" style="padding-bottom:0">
-      <button class="act-btn" onclick="abrirGoogleMaps(${q.lat}, ${q.lon})">📍 Ver no Google Maps</button>
-      <button class="act-btn" onclick="abrirGoogleEarth(${q.lat}, ${q.lon})">🌐 Ver no Google Earth</button>
-      <button class="act-btn" onclick="abrirGeosampa(${q.lat}, ${q.lon})">🗺️ Ver no Geosampa</button>
+      <button class="act-btn" onclick="abrirGoogleMaps(${_centroFicha(q,_stats).lat}, ${_centroFicha(q,_stats).lon})">📍 Ver no Google Maps</button>
+      <button class="act-btn" onclick="abrirGoogleEarth(${_centroFicha(q,_stats).lat}, ${_centroFicha(q,_stats).lon})">🌐 Ver no Google Earth</button>
+      <button class="act-btn" onclick="abrirGeosampa(${_centroFicha(q,_stats).lat}, ${_centroFicha(q,_stats).lon})">🗺️ Ver no Geosampa</button>
       <button class="act-btn prim" onclick='abrirModalProspeccao("${q.id}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}")'>📧 Enviar Prospecção e/ou Pipeline</button>
       <button class="act-btn" style="border-color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#90a4ae'};color:${VALIDACAO_ALE_CACHE[_stats.subId]?COR_VALIDACAO_ALE:'#607d8b'}" onclick='toggleValidacaoAleUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${VALIDACAO_ALE_CACHE[_stats.subId]?"↩️ Remover validação com o Ale":"✅ Validar com o Ale"}</button>
       <button class="act-btn" style="border-color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#90a4ae'};color:${BAIXA_PRIORIDADE_CACHE[_stats.subId]?COR_BAIXA_PRIORIDADE:'#607d8b'}" onclick='toggleBaixaPrioridadeUI("${q.id.split("-")[0]}","${_stats.subId}","${(q.bairro||"").replace(/"/g,"&quot;")}",${JSON.stringify(_stats.lotes)},${_stats.area})'>${BAIXA_PRIORIDADE_CACHE[_stats.subId]?"↩️ Remover baixa prioridade":"🔽 Baixa prioridade"}</button>
