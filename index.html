@@ -8038,7 +8038,7 @@ function _renderUmaQuadra(q){
     const subs=getSubGroups(q);
     if (!subs.length) return;
     const geom=GEOM_MAP[q.bairro+'::'+q.id];
-    const semRestricaoNenhuma = subs.length===1 && subs[0].tipo==='ativo';
+    const semRestricaoNenhuma = subs.length===1 && subs[0].tipo==='ativo' && !subs[0].virtual; // combinação do Econômico: desenha só os lotes dela (abaixo), não a geometria da quadra toda
 
     if (semRestricaoNenhuma) {
       // Caso normal: nenhum lote restrito — polígono único preciso de sempre.
