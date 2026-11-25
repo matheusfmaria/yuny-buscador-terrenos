@@ -3405,6 +3405,7 @@ function _lerFiltrosMcmv(){
   qfilters.usoClasses = usos.length && usos.length < 4 ? new Set(usos) : null;
   const ests = ['LANCAR','MONITORAR','IGNORAR','SEM_DADO'].filter(c => document.getElementById('qf-estudo-'+c)?.checked);
   qfilters.estudoClasses = ests.length && ests.length < 4 ? new Set(ests) : null;
+  if (typeof currentProfile!=='undefined' && currentProfile==='compacto' && !_soLancarAtivo()) carregarDistritosMcmvPendentes();
 }
 let selectedSql=null, selectedQid=null, selectedSubId=null, selectedBairro=null, visibleLotes=[], visibleQuadras=[];
 
@@ -7251,9 +7252,25 @@ function subPassaFiltrosMcmv(q, sub){
 // Distritos habilitados por padrão no perfil MCMV (lista do Matheus, 17/11/2026)
 const MCMV_DISTRITOS_NOMES = ['Vila Leopoldina','Lapa','Pirituba','Jaraguá','Barra Funda','Freguesia do Ó','Santa Cecília','República','Bom Retiro','Santana','Tucuruvi','Jabaquara','Campo Grande','Vila Andrade','Jardim São Luís','Campo Limpo','Capão Redondo','Cidade Dutra','Grajaú','Parelheiros','Ipiranga','Cursino','Vila Prudente','São Lucas','Água Rasa','Sapopemba','São Mateus','Butantã','Morumbi','Vila Sônia','Jaguaré','Perus','Liberdade','Sé','Brás','Cambuci','Mooca','Belém','Tatuapé','Carrão','Penha','Vila Matilde','Artur Alvim','Itaquera','José Bonifácio','Guaianases','Lajeado','Cangaíba','Ermelino Matarazzo','São Miguel','Jardim Helena','Vila Curuçá','Itaim Paulista','Jardim Ângela','Iguatemi','Vila Formosa','Brasilândia','São Rafael'];
 function _semAcento(s){ return s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[_-]/g,' ').trim(); }
+// Distritos sem nenhuma sobreposição com regiões "Lançar" do estudo HIS compacto:
+// só são carregados quando o filtro de estudo inclui outras classes (Monitorar/Ignorar/Sem dado)
+const MCMV_DISTRITOS_SEM_LANCAR = ['Grajaú','Brasilândia','Parelheiros','Ermelino Matarazzo','São Lucas','Vila Prudente'];
+function _soLancarAtivo(){
+  const ec = qfilters.estudoClasses;
+  return !!(ec && ec.size===1 && ec.has('LANCAR'));
+}
 function distritosMcmv(){
   const alvo = new Set(MCMV_DISTRITOS_NOMES.map(_semAcento));
+  if (_soLancarAtivo()) MCMV_DISTRITOS_SEM_LANCAR.forEach(n => alvo.delete(_semAcento(n)));
   return DISTRITOS_DISPONIVEIS.filter(d => alvo.has(_semAcento(d.distrito))).map(d=>d.distrito);
+}
+let _carregandoMcmvExtra = false;
+async function carregarDistritosMcmvPendentes(){
+  if (currentProfile!=='compacto' || _carregandoMcmvExtra) return;
+  const pend = distritosMcmv().filter(d => !regioesCarregadas.has(d));
+  if (!pend.length) return;
+  _carregandoMcmvExtra = true;
+  try { await carregarTodosOsBairros(pend); } finally { _carregandoMcmvExtra = false; }
 }
 let _mcmvCamaxAlto = null, _mcmvAreaAlto = null, _mcmvHideOuAlto = null;
 // Liga/desliga os padrões exclusivos do perfil MCMV (e restaura os do Alto padrão)
