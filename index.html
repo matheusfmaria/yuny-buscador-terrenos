@@ -620,6 +620,9 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
           <div class="fl">Regularidade mínima do formato (%)</div>
           <div class="minmax-row"><input type="number" id="qf-reg-min" min="0" max="100" step="5" placeholder="Ex.: 60" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
           <div style="font-size:9.5px;color:#888;line-height:1.4;margin-bottom:4px">100% = quadrado. Mede o quanto a composição preenche o menor retângulo que a envolve e o quanto é comprida. Em branco = sem filtro (a regularidade sempre pesa no score).</div>
+          <div class="fl">Encravada: mín. % das divisas com edifícios/condomínios</div>
+          <div class="minmax-row"><input type="number" id="qf-enc-min" min="0" max="100" step="10" placeholder="Ex.: 50" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
+          <div style="font-size:9.5px;color:#888;line-height:1.4;margin-bottom:4px">Das divisas que não são rua (laterais e fundos), quanto encosta em condomínio, edifício (≥ 5 pav.) ou lote muito construído (CA ≥ 2,5) — vizinhos que dificilmente serão remembrados por quem busca áreas maiores. Em branco = sem filtro (sempre pesa no score).</div>
           <label class="check-row"><input type="checkbox" id="qf-esquina" checked onchange="atualizarFiltroNumerico()"> Apenas imóveis em esquina</label>
           <div class="fl">Uso do imóvel (cadastro IPTU)</div>
           <label class="check-row"><input type="checkbox" id="qf-uso-comercial" checked onchange="atualizarFiltroNumerico()"> 🏬 Comercial / não residencial</label>
@@ -3400,6 +3403,7 @@ function _lerFiltrosMcmv(){
   qfilters.estFuturas = !!document.getElementById('qf-est-futuras')?.checked;
   qfilters.frenteMin = num('qf-frente-min', 0);
   qfilters.regMin = num('qf-reg-min', 0);
+  qfilters.encMin = num('qf-enc-min', 0);
   qfilters.soEsquina = !!document.getElementById('qf-esquina')?.checked;
   const usos = ['comercial','misto','residencial','vago'].filter(c => document.getElementById('qf-uso-'+c)?.checked);
   qfilters.usoClasses = usos.length && usos.length < 4 ? new Set(usos) : null;
@@ -7284,6 +7288,10 @@ function subPassaFiltrosMcmv(q, sub){
     const rg = regularidadeLotes(q.id.split('-')[0], sub.lotes);
     if (rg && rg.idx*100 < qfilters.regMin) return false;
   }
+  if (qfilters.encMin > 0) {
+    const ec = confinamentoLotes(q, sub.lotes);
+    if (!ec || ec.pct*100 < qfilters.encMin) return false;
+  }
   if (qfilters.frenteMin > 0 || qfilters.soEsquina || qfilters.usoClasses) {
     const at = atributosLotes(q, sub.lotes);
     if (qfilters.soEsquina && !at.esquina) return false;
@@ -7332,7 +7340,7 @@ function aplicarPadroesMcmv(ligar){
     if (ou) { if (_mcmvHideOuAlto === null) _mcmvHideOuAlto = ou.checked; ou.checked = false; } // Econômico: não oculta Operação Urbana
     if (_mcmvAreaAlto === null) _mcmvAreaAlto = {min: document.getElementById('qf-area-min')?.value ?? '', max: document.getElementById('qf-area-max')?.value ?? ''};
     set('qf-camax-min','4'); set('qf-nlotes-max','1'); set('qf-est-raio','500');
-    set('qf-area-min','1200'); set('qf-area-max','1800'); set('qf-frente-min','30'); set('qf-reg-min','');
+    set('qf-area-min','1200'); set('qf-area-max','1800'); set('qf-frente-min','30'); set('qf-reg-min',''); set('qf-enc-min','');
     const esq=document.getElementById('qf-esquina'); if(esq) esq.checked=true;
     ['comercial','misto','residencial','vago'].forEach(c=>{ const el=document.getElementById('qf-uso-'+c); if(el) el.checked=true; });
     ['LANCAR','MONITORAR','IGNORAR','SEM_DADO'].forEach(c=>{ const el=document.getElementById('qf-estudo-'+c); if(el) el.checked = (c==='LANCAR'); });
@@ -7464,6 +7472,56 @@ function frentePorFaceDeRua(q, lotesFrente){
   const vals = Object.values(soma);
   return {maior: Math.max(...vals), nFaces: vals.length};
 }
+// ── Confinamento ("encravada"): composição cercada por edifícios/condomínios ──
+// Contra incorporadoras que só olham áreas maiores, um terreno de 1.200–1.800 m² cujos
+// vizinhos já são edifícios/condomínios (que não vão ser remembrados) tem mais chance.
+// Mede, no perímetro que NÃO é rua (laterais e fundos), a fração que encosta em lote
+// "consolidado": condomínio (flag do cadastro), ≥ 5 pavimentos ou coef. de aproveitamento ≥ 2,5.
+function _loteConsolidado(qb, l){
+  const a = IPTU_RAW[qb+'.'+l]; if (!a) return false;
+  return a[10]===1 || (a[5]||0) >= 5 || ((a[1]||0) > 0 && (a[0]||0)/a[1] >= 2.5);
+}
+const _confCache = new Map();
+function confinamentoLotes(q, lotes){
+  const qb = q.id.split('-')[0], key = q.bairro+'|'+qb+'|'+lotes.join(',');
+  if (_confCache.has(key)) return _confCache.get(key);
+  let res = null;
+  try {
+    const todos = _lotesDaQuadraBase(q);
+    const cosL = Math.cos((q.lat||-23.5)*Math.PI/180);
+    const toM = c => [c[0]*cosL*111320, c[1]*111320];
+    const ring = {};
+    todos.forEach(l => { const g = LOTES_GEOM[qb+'.'+l]; if (g && g.length>=3) ring[l] = g.map(toM); });
+    const dps = (p,a,b) => { const dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy;
+      let t = L2 ? ((p[0]-a[0])*dx+(p[1]-a[1])*dy)/L2 : 0; t = Math.max(0, Math.min(1, t));
+      return Math.hypot(p[0]-(a[0]+t*dx), p[1]-(a[1]+t*dy)); };
+    const TOL = 0.8, minhas = new Set(lotes);
+    let lat = 0, blq = 0; const viz = new Set(), vizBlq = new Set();
+    if (lotes.every(l => ring[l])) {
+      lotes.forEach(l => {
+        const R = ring[l];
+        for (let i=0;i<R.length-1;i++) {
+          const a = R[i], b = R[i+1], len = Math.hypot(b[0]-a[0], b[1]-a[1]);
+          if (len < 0.5) continue;
+          const pts = [[(a[0]+b[0])/2,(a[1]+b[1])/2], [(a[0]*3+b[0])/4,(a[1]*3+b[1])/4], [(a[0]+b[0]*3)/4,(a[1]+b[1]*3)/4]];
+          let achou = null;
+          for (const o in ring) {
+            if (o === l) continue;
+            const O = ring[o]; const ok = [0,0,0];
+            for (let k=0;k<O.length-1;k++) { for (let m=0;m<3;m++) if (!ok[m] && dps(pts[m],O[k],O[k+1]) < TOL) ok[m]=1; }
+            if (ok[0] && (ok[1] || ok[2])) { achou = o; break; }
+          }
+          if (!achou || minhas.has(achou)) continue; // rua, ou divisa interna da composição
+          lat += len; viz.add(achou);
+          if (_loteConsolidado(qb, achou)) { blq += len; vizBlq.add(achou); }
+        }
+      });
+    }
+    if (lat >= 5) res = {pct: blq/lat, lat, blq, nViz: viz.size, nBlq: vizBlq.size};
+  } catch(e) { console.warn('Confinamento falhou:', e); }
+  _confCache.set(key, res);
+  return res;
+}
 function atributosLotes(q, lotes){
   const qb = q.id.split('-')[0];
   const chave = qb+'|'+(lotes||[]).join(',');
@@ -7496,7 +7554,7 @@ function atributosLotes(q, lotes){
   return r;
 }
 // Pesos do score do perfil (somam 100) — ajustar só aqui
-const PESOS_MCMV = {estudo:26, est:18, regular:10, lotes:12, terreno:8, zon:8, uso:6, area:4, frente:4, esquina:4};
+const PESOS_MCMV = {estudo:22, est:14, regular:10, lotes:12, terreno:8, zon:8, uso:6, area:4, frente:4, esquina:4, encrav:8};
 // ── Regularidade do formato (pedido de 25/11/2026): quanto mais próxima de um quadrado, melhor ──
 // Índice = (área dos lotes ÷ área do menor retângulo que os envolve) × √(lado menor ÷ lado maior).
 // Quadrado/retângulo cheio ≈ 1; L, T e formas recortadas caem pelo 1º fator; faixas compridas, pelo 2º.
@@ -7559,8 +7617,10 @@ function scoreMcmvDetalhe(q, area, n, lotes, rapido){
   const reg = regularidadeLotes(q.id.split('-')[0], lotes);
   const regPts = ptsRegularidade(reg, P.regular);
   const usoPts = at.uso ? Math.round((PTS_USO[at.uso]||0) * P.uso) : Math.round(P.uso/3);
-  const total = Math.min(100, estudoPts+estPts+zon+neg+are+terPts+frentePts+esquinaPts+usoPts+regPts);
-  return {est, estudo, at, estudoPts, estPts, zon, neg, are, ter, terPts, frentePts, esquinaPts, usoPts, reg, regPts, total};
+  const enc = confinamentoLotes(q, lotes);
+  const encPts = enc ? Math.round(Math.min(1, enc.pct/0.8) * P.encrav) : Math.round(P.encrav/2); // 80%+ do lateral/fundos confinado = pontuação cheia
+  const total = Math.min(100, estudoPts+estPts+zon+neg+are+terPts+frentePts+esquinaPts+usoPts+regPts+encPts);
+  return {est, estudo, at, estudoPts, estPts, zon, neg, are, ter, terPts, frentePts, esquinaPts, usoPts, reg, regPts, enc, encPts, total};
 }
 function scoreMcmv(q, area, n, lotes){
   if (n === 0) return 0;
@@ -7582,6 +7642,7 @@ function htmlScoreMcmv(q, stats){
     scoreBar('Regularidade do formato'+(d.reg?' ('+Math.round(d.reg.rect*100)+'% do retângulo envolvente · proporção 1:'+(d.reg.lado1/d.reg.lado2).toFixed(1).replace('.',',')+')':' (sem geometria)'), d.regPts, PESOS_MCMV.regular),
     scoreBar('Frente'+(d.at.frente!=null?' ('+d.at.frente.toLocaleString('pt-BR',{maximumFractionDigits:1})+' m'+(d.at.nFaces>1?' · maior de '+d.at.nFaces+' faces':'')+')':' (sem testada cadastrada)'), d.frentePts, PESOS_MCMV.frente),
     scoreBar('Imóvel em esquina'+(d.at.esquina?' (sim)':' (não)'), d.esquinaPts, PESOS_MCMV.esquina),
+    scoreBar('Encravada entre edifícios/condomínios'+(d.enc?' ('+Math.round(d.enc.pct*100)+'% das divisas laterais/fundos · '+d.enc.nBlq+' de '+d.enc.nViz+' vizinhos)':' (sem vizinhos de divisa)'), d.encPts, PESOS_MCMV.encrav),
     scoreBar('Uso do imóvel ('+({comercial:'comercial / não residencial',misto:'misto',residencial:'residencial',vago:'terreno vago'}[d.at.uso]||'sem cadastro')+')', d.usoPts, PESOS_MCMV.uso),
   ].join('') + `
     <div style="margin-top:8px;padding:8px 10px;border:1px solid #e0e0e0;border-left:4px solid #1b5e20;border-radius:6px;font-size:11.5px;line-height:1.55;background:#fafafa">
