@@ -7292,15 +7292,18 @@ function subPassaFiltrosMcmv(q, sub){
     const ec = confinamentoLotes(q, sub.lotes);
     if (!ec || ec.pct*100 < qfilters.encMin) return false;
   }
-  if (qfilters.frenteMin > 0 || qfilters.soEsquina || qfilters.usoClasses) {
-    const at = atributosLotes(q, sub.lotes);
-    if (qfilters.soEsquina && !at.esquina) return false;
-    if (qfilters.frenteMin > 0 && at.frente != null && at.frente < qfilters.frenteMin) return false;
-    if (qfilters.usoClasses && at.uso && !qfilters.usoClasses.has(at.uso)) return false;
-  }
   if (qfilters.estRaio < Infinity) {
     const c = centroRapidoSub(q, sub.lotes);
     if (distEstacaoFiltro(c.lat, c.lon, qfilters.estModo, qfilters.estFuturas, qfilters.estRaio) > qfilters.estRaio) return false;
+  }
+  if (qfilters.frenteMin > 0 || qfilters.soEsquina || qfilters.usoClasses) {
+    const at0 = atributosLotes(q, sub.lotes, true);               // triagem barata (sem faces de rua)
+    if (qfilters.soEsquina && !at0.esquina) return false;
+    if (qfilters.usoClasses && at0.uso && !qfilters.usoClasses.has(at0.uso)) return false;
+    if (qfilters.frenteMin > 0 && at0.frente != null) {
+      if (at0.frente < qfilters.frenteMin) return false;
+      if (sub.lotes.length > 1) { const at = atributosLotes(q, sub.lotes); if (at.frente != null && at.frente < qfilters.frenteMin) return false; }
+    }
   }
   return true;
 }
@@ -7402,63 +7405,77 @@ const USOS_IPTU_RESIDENCIAL = new Set([2,3,5,7,8,14,32,33,34,37]); // inclui "pr
 // faces pela geometria: arestas de um lote que não encostam em outro lote da
 // quadra são arestas de rua; cada lote ganha o rumo da sua maior aresta de rua;
 // lotes vizinhos com rumo parecido (< 30°) ficam na mesma face e somam a testada.
-const _lotesQuadraBaseCache = new Map();
+const _ctxQuadraCache = new Map();
+let _ctxQuadraN = -1;
+// Contexto geométrico da quadra-base (lotes em metros + bbox), calculado UMA vez por quadra.
+// Índice bairro|quadra -> lotes construído numa única passada em QUADRAS (antes cada chamada
+// varria QUADRAS inteira, o que travava o carregamento do perfil econômico).
+let _idxQuadraBase = null;
 function _lotesDaQuadraBase(q){
+  if (!_idxQuadraBase || _ctxQuadraN !== QUADRAS.length) {
+    _idxQuadraBase = new Map(); _ctxQuadraCache.clear(); _ctxQuadraN = QUADRAS.length;
+    QUADRAS.forEach(x => { const k = x.bairro+'|'+x.id.split('-')[0]; let st = _idxQuadraBase.get(k); if (!st) _idxQuadraBase.set(k, st = new Set()); x.lotes.forEach(l=>st.add(l)); });
+  }
+  const st = _idxQuadraBase.get(q.bairro+'|'+q.id.split('-')[0]);
+  return st ? [...st] : [];
+}
+function _ctxQuadra(q){
+  _lotesDaQuadraBase(q); // garante índice/validade do cache
   const qb = q.id.split('-')[0], k = q.bairro+'|'+qb;
-  let r = _lotesQuadraBaseCache.get(k);
-  if (r) return r;
-  const set = new Set(); QUADRAS.forEach(x => { if (x.bairro===q.bairro && x.id.split('-')[0]===qb) x.lotes.forEach(l=>set.add(l)); });
-  r = [...set]; _lotesQuadraBaseCache.set(k, r); return r;
+  let c = _ctxQuadraCache.get(k); if (c) return c;
+  const cosL = Math.cos((q.lat||-23.5)*Math.PI/180);
+  const ring = {}, bbox = {}, kx = cosL*111320, ky = 111320;
+  const getRing = l => { let R = ring[l]; if (R) return R; const g = LOTES_GEOM[qb+'.'+l]; if (!g || g.length<3) return null; return (ring[l] = g.map(p => [p[0]*kx, p[1]*ky])); };
+  _lotesDaQuadraBase(q).forEach(l => {
+    const g = LOTES_GEOM[qb+'.'+l]; if (!g || g.length<3) return;
+    let x0=1e18,y0=1e18,x1=-1e18,y1=-1e18; for (let i=0;i<g.length;i++){ const p=g[i]; if(p[0]<x0)x0=p[0]; if(p[0]>x1)x1=p[0]; if(p[1]<y0)y0=p[1]; if(p[1]>y1)y1=p[1]; }
+    bbox[l] = [x0*kx-1,y0*ky-1,x1*kx+1,y1*ky+1];
+  });
+  // Grade espacial (células de 25 m): cada célula lista os lotes cujo bbox a toca
+  const CEL = 25, grade = new Map();
+  for (const l in bbox) { const bb = bbox[l];
+    for (let cx = Math.floor(bb[0]/CEL); cx <= Math.floor(bb[2]/CEL); cx++) for (let cy = Math.floor(bb[1]/CEL); cy <= Math.floor(bb[3]/CEL); cy++) {
+      const kk = cx*100003+cy; let arr = grade.get(kk); if (!arr) grade.set(kk, arr = []); arr.push(l); } }
+  // Adjacência pré-calculada (UMA vez por quadra): pra cada aresta de cada lote, qual lote encosta nela
+  // (null = rua) + direção da normal externa. Composição só consulta isso.
+  const TOL = 0.8, TOL2 = TOL*TOL, adjCache = {};
+  // ponto (px,py) a menos de TOL do segmento a-b? (sem sqrt/hypot e sem alocar)
+  const perto = (px,py,a,b) => { const dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy;
+    let t = L2 ? ((px-a[0])*dx+(py-a[1])*dy)/L2 : 0; if (t<0) t=0; else if (t>1) t=1;
+    const ex = px-(a[0]+t*dx), ey = py-(a[1]+t*dy); return ex*ex+ey*ey < TOL2; };
+  const adj = l => {            // calculada sob demanda, só para os lotes realmente consultados
+    let r = adjCache[l]; if (r !== undefined) return r;
+    const R = getRing(l); if (!R) return (adjCache[l] = null);
+    let areaAss = 0; for (let i=0;i<R.length-1;i++) areaAss += R[i][0]*R[i+1][1]-R[i+1][0]*R[i][1];
+    const sinal = areaAss >= 0 ? 1 : -1, E = [], viz = new Set(); let best = 0, rumo = null;
+    for (let i=0;i<R.length-1;i++) {
+      const a = R[i], b = R[i+1], len = Math.sqrt((b[0]-a[0])*(b[0]-a[0])+(b[1]-a[1])*(b[1]-a[1]));
+      if (len < 0.5) continue;
+      const mx = (a[0]+b[0])/2, my = (a[1]+b[1])/2, q1x = (a[0]*3+b[0])/4, q1y = (a[1]*3+b[1])/4, q3x = (a[0]+b[0]*3)/4, q3y = (a[1]+b[1]*3)/4;
+      let achou = null;
+      const cand = grade.get(Math.floor(mx/CEL)*100003+Math.floor(my/CEL)) || [];
+      for (let ci=0; ci<cand.length; ci++) {
+        const o = cand[ci];
+        if (o === l) continue;
+        const bb = bbox[o]; if (mx<bb[0]||mx>bb[2]||my<bb[1]||my>bb[3]) continue;
+        const O = getRing(o); let ok0 = false;
+        for (let kk=0;kk<O.length-1;kk++) if (perto(mx,my,O[kk],O[kk+1])) { ok0 = true; break; }
+        if (!ok0) continue; // ponto médio não encosta: nem testa os outros dois
+        let ok1 = false, ok2 = false;
+        for (let kk=0;kk<O.length-1 && !(ok1 && ok2);kk++) { if (!ok1 && perto(q1x,q1y,O[kk],O[kk+1])) ok1 = true; if (!ok2 && perto(q3x,q3y,O[kk],O[kk+1])) ok2 = true; }
+        if (ok1 || ok2) { achou = o; break; }
+      }
+      E.push({len, viz: achou});
+      if (achou) viz.add(achou);
+      else if (len > best) { best = len; const nx = sinal*(b[1]-a[1]), ny = -sinal*(b[0]-a[0]); rumo = (Math.atan2(ny, nx)*180/Math.PI + 360) % 360; }
+    }
+    return (adjCache[l] = {E, rumo, viz});
+  };
+  c = {ring, bbox, adj}; _ctxQuadraCache.set(k, c); return c;
 }
 function frentePorFaceDeRua(q, lotesFrente){
-  const qb = q.id.split('-')[0];
-  const todos = _lotesDaQuadraBase(q);
-  const cosL = Math.cos((q.lat||-23.5)*Math.PI/180);
-  const toM = c => [c[0]*cosL*111320, c[1]*111320];
-  const ring = {};
-  todos.forEach(l => { const g = LOTES_GEOM[qb+'.'+l]; if (g && g.length>=3) ring[l] = g.map(toM); });
-  function distPontoSeg(p,a,b){
-    const dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy;
-    let t = L2 ? ((p[0]-a[0])*dx+(p[1]-a[1])*dy)/L2 : 0; t = Math.max(0, Math.min(1, t));
-    return Math.hypot(p[0]-(a[0]+t*dx), p[1]-(a[1]+t*dy));
-  }
-  const TOL = 0.8; // m
-  // aresta (i,i+1) do lote l encosta em qual outro lote?
-  function vizinhoDaAresta(l, a, b){
-    const m = [(a[0]+b[0])/2, (a[1]+b[1])/2];
-    const q1 = [(a[0]*3+b[0])/4, (a[1]*3+b[1])/4], q3 = [(a[0]+b[0]*3)/4, (a[1]+b[1]*3)/4];
-    for (const o in ring) {
-      if (o === l) continue;
-      const R = ring[o]; let ok = [0,0,0];
-      for (let i=0;i<R.length-1;i++) {
-        const c = R[i], d = R[i+1];
-        if (distPontoSeg(m,c,d) < TOL) ok[0]=1;
-        if (distPontoSeg(q1,c,d) < TOL) ok[1]=1;
-        if (distPontoSeg(q3,c,d) < TOL) ok[2]=1;
-        if (ok[0]&&ok[1]&&ok[2]) return o;
-      }
-      if (ok[0] && (ok[1]||ok[2])) return o; // meia face encostada também conta
-    }
-    return null;
-  }
-  const info = {}; // lote -> {rumo, viz:Set}
-  lotesFrente.forEach(([l]) => {
-    const R = ring[l]; if (!R) return;
-    let best = 0, rumo = null; const viz = new Set();
-    let areaAss = 0; for (let i=0;i<R.length-1;i++) areaAss += R[i][0]*R[i+1][1]-R[i+1][0]*R[i][1];
-    const sinal = areaAss >= 0 ? 1 : -1; // anti-horário => normal externa à direita da aresta
-    for (let i=0;i<R.length-1;i++) {
-      const a = R[i], b = R[i+1], len = Math.hypot(b[0]-a[0], b[1]-a[1]);
-      if (len < 0.5) continue;
-      const v = vizinhoDaAresta(l, a, b);
-      if (v) { viz.add(v); continue; }
-      if (len > best) { best = len; // direção da normal EXTERNA (0–360): fachadas opostas, mesmo paralelas, são faces diferentes
-        const nx = sinal*(b[1]-a[1]), ny = -sinal*(b[0]-a[0]);
-        rumo = (Math.atan2(ny, nx)*180/Math.PI + 360) % 360; }
-    }
-    info[l] = {rumo, viz};
-  });
-  if (lotesFrente.some(([l]) => !info[l])) return null; // sem geometria: mantém a soma
+  const ctx = _ctxQuadra(q), info = {};
+  for (const [l] of lotesFrente) { const r = ctx.adj(l); if (!r) return null; info[l] = r; } // sem geometria: mantém a soma
   const dRumo = (a,b) => { let d = Math.abs(a-b)%360; return d>180 ? 360-d : d; };
   const pai = {}; lotesFrente.forEach(([l]) => pai[l]=l);
   const raiz = x => pai[x]===x ? x : (pai[x]=raiz(pai[x]));
@@ -7487,44 +7504,24 @@ function confinamentoLotes(q, lotes){
   if (_confCache.has(key)) return _confCache.get(key);
   let res = null;
   try {
-    const todos = _lotesDaQuadraBase(q);
-    const cosL = Math.cos((q.lat||-23.5)*Math.PI/180);
-    const toM = c => [c[0]*cosL*111320, c[1]*111320];
-    const ring = {};
-    todos.forEach(l => { const g = LOTES_GEOM[qb+'.'+l]; if (g && g.length>=3) ring[l] = g.map(toM); });
-    const dps = (p,a,b) => { const dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy;
-      let t = L2 ? ((p[0]-a[0])*dx+(p[1]-a[1])*dy)/L2 : 0; t = Math.max(0, Math.min(1, t));
-      return Math.hypot(p[0]-(a[0]+t*dx), p[1]-(a[1]+t*dy)); };
-    const TOL = 0.8, minhas = new Set(lotes);
-    let lat = 0, blq = 0; const viz = new Set(), vizBlq = new Set();
-    if (lotes.every(l => ring[l])) {
-      lotes.forEach(l => {
-        const R = ring[l];
-        for (let i=0;i<R.length-1;i++) {
-          const a = R[i], b = R[i+1], len = Math.hypot(b[0]-a[0], b[1]-a[1]);
-          if (len < 0.5) continue;
-          const pts = [[(a[0]+b[0])/2,(a[1]+b[1])/2], [(a[0]*3+b[0])/4,(a[1]*3+b[1])/4], [(a[0]+b[0]*3)/4,(a[1]+b[1]*3)/4]];
-          let achou = null;
-          for (const o in ring) {
-            if (o === l) continue;
-            const O = ring[o]; const ok = [0,0,0];
-            for (let k=0;k<O.length-1;k++) { for (let m=0;m<3;m++) if (!ok[m] && dps(pts[m],O[k],O[k+1]) < TOL) ok[m]=1; }
-            if (ok[0] && (ok[1] || ok[2])) { achou = o; break; }
-          }
-          if (!achou || minhas.has(achou)) continue; // rua, ou divisa interna da composição
-          lat += len; viz.add(achou);
-          if (_loteConsolidado(qb, achou)) { blq += len; vizBlq.add(achou); }
-        }
-      });
+    const ctx = _ctxQuadra(q), minhas = new Set(lotes);
+    const adjs = lotes.map(l => ctx.adj(l));
+    if (adjs.every(x => x)) {
+      let lat = 0, blq = 0; const viz = new Set(), vizBlq = new Set();
+      adjs.forEach(x => x.E.forEach(e => {
+        if (!e.viz || minhas.has(e.viz)) return; // rua, ou divisa interna da composição
+        lat += e.len; viz.add(e.viz);
+        if (_loteConsolidado(qb, e.viz)) { blq += e.len; vizBlq.add(e.viz); }
+      }));
+      if (lat >= 5) res = {pct: blq/lat, lat, blq, nViz: viz.size, nBlq: vizBlq.size};
     }
-    if (lat >= 5) res = {pct: blq/lat, lat, blq, nViz: viz.size, nBlq: vizBlq.size};
   } catch(e) { console.warn('Confinamento falhou:', e); }
   _confCache.set(key, res);
   return res;
 }
-function atributosLotes(q, lotes){
+function atributosLotes(q, lotes, aprox){
   const qb = q.id.split('-')[0];
-  const chave = qb+'|'+(lotes||[]).join(',');
+  const chave = (aprox?'a|':'')+qb+'|'+q.bairro+'|'+(qfilters.frenteMin||0)+'|'+(lotes||[]).join(',');
   let r = _atribLotesCache.get(chave);
   if (r) return r;
   let frente = 0, temFrente = false, esquina = false, nRes = 0, nNres = 0, nVago = 0, semCad = 0;
@@ -7545,7 +7542,8 @@ function atributosLotes(q, lotes){
   const uso = nRes && nNres ? 'misto' : nNres ? 'comercial' : nRes ? 'residencial' : nVago ? 'vago' : null;
   // Composição com face para mais de uma rua: vale a MAIOR frente (não a soma das ruas)
   let nFaces = 1;
-  if (temFrente && lotesFrente.length > 1) {
+  // aprox = triagem rápida: usa a soma das testadas (limite superior da maior face), sem geometria
+  if (!aprox && temFrente && lotesFrente.length > 1 && !(qfilters.frenteMin > 0 && frente < qfilters.frenteMin)) {
     try { const f = frentePorFaceDeRua(q, lotesFrente); if (f) { frente = f.maior; nFaces = f.nFaces; } }
     catch(e) { console.warn('Frente por face de rua falhou, mantendo a soma:', e); }
   }
@@ -7604,7 +7602,7 @@ function scoreMcmvDetalhe(q, area, n, lotes, rapido){
   const ce = centroRapidoSub(q, lotes);
   const est = estacaoAtrativa(ce.lat, ce.lon);
   const estudo = areaHisDoPonto(ce.lat, ce.lon);
-  const at = atributosLotes(q, lotes);
+  const at = atributosLotes(q, lotes, rapido);
   const estudoPts = Math.round(ptsEstudoHis(estudo) * P.estudo/15); // Lançar 20–30, Monitorar 12, sem HIS na região 4, Ignorar 0
   const estPts = est ? Math.round(est.pts * P.est/25) : 0;
   const zon = Math.round((ZONA_MCMV[q.zona] || 0) * P.zon/10);
@@ -7617,7 +7615,7 @@ function scoreMcmvDetalhe(q, area, n, lotes, rapido){
   const reg = regularidadeLotes(q.id.split('-')[0], lotes);
   const regPts = ptsRegularidade(reg, P.regular);
   const usoPts = at.uso ? Math.round((PTS_USO[at.uso]||0) * P.uso) : Math.round(P.uso/3);
-  const enc = confinamentoLotes(q, lotes);
+  const enc = rapido ? null : confinamentoLotes(q, lotes);
   const encPts = enc ? Math.round(Math.min(1, enc.pct/0.8) * P.encrav) : Math.round(P.encrav/2); // 80%+ do lateral/fundos confinado = pontuação cheia
   const total = Math.min(100, estudoPts+estPts+zon+neg+are+terPts+frentePts+esquinaPts+usoPts+regPts+encPts);
   return {est, estudo, at, estudoPts, estPts, zon, neg, are, ter, terPts, frentePts, esquinaPts, usoPts, reg, regPts, enc, encPts, total};
@@ -9102,13 +9100,15 @@ async function setProfile(p) {
   limparCacheGetSubGroups();
   document.getElementById('profile-alto').classList.toggle('on', p==='alto');
   document.getElementById('profile-compacto').classList.toggle('on', p==='compacto');
-  // Recalcula scores e reaplica filtros/render
-  applyFilters();
-  applyQFilters();
+  // Perfil econômico: baixa os distritos ANTES de recalcular filtros/scores — assim a tela de
+  // carregamento aparece de imediato (o recálculo pesado não trava a página antes dela).
   if (p === 'compacto') {
     const pend = distritosMcmv().filter(d => !regioesCarregadas.has(d));
     if (pend.length) await carregarTodosOsBairros(distritosMcmv());
   }
+  // Recalcula scores e reaplica filtros/render
+  applyFilters();
+  applyQFilters();
 }
 
 // Janela de pontuação: platô central com decaimento linear nas bordas
