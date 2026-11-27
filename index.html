@@ -613,7 +613,7 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
           <label class="check-row"><input type="checkbox" id="qf-estudo-IGNORAR" onchange="atualizarFiltroNumerico()"> 🟥 Ignorar</label>
           <label class="check-row"><input type="checkbox" id="qf-estudo-SEM_DADO" onchange="atualizarFiltroNumerico()"> ⬜ Sem HIS compacto na região</label>
           <div class="fl">Máx. de lotes na composição</div>
-          <div class="minmax-row"><input type="number" id="qf-nlotes-max" value="1" min="1" step="1" placeholder="Máx" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
+          <div class="minmax-row"><input type="number" id="qf-nlotes-max" value="2" min="1" step="1" placeholder="Máx" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
           <div class="fl">Frente mínima da composição (m)</div>
           <div class="minmax-row"><input type="number" id="qf-frente-min" min="0" step="1" placeholder="Mín" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
           <div style="font-size:9.5px;color:#888;line-height:1.4;margin-bottom:4px">Soma da testada (cadastro IPTU) dos lotes que dão frente para a rua; lote sem testada cadastrada não é excluído.</div>
@@ -623,7 +623,9 @@ body.modo-captura .map-wrap{flex:1;min-height:100vh}
           <div class="fl">Encravada: mín. % das divisas com edifícios/condomínios</div>
           <div class="minmax-row"><input type="number" id="qf-enc-min" min="0" max="100" step="10" placeholder="Ex.: 50" inputmode="numeric" oninput="atualizarFiltroNumerico()"></div>
           <div style="font-size:9.5px;color:#888;line-height:1.4;margin-bottom:4px">Das divisas que não são rua (laterais e fundos), quanto encosta em condomínio, edifício (≥ 5 pav.) ou lote muito construído (CA ≥ 2,5) — vizinhos que dificilmente serão remembrados por quem busca áreas maiores. Em branco = sem filtro (sempre pesa no score).</div>
-          <label class="check-row"><input type="checkbox" id="qf-esquina" checked onchange="atualizarFiltroNumerico()"> Apenas imóveis em esquina</label>
+          <label class="check-row"><input type="checkbox" id="qf-todas-comp" onchange="atualizarFiltroNumerico()"> Mostrar todas as composições possíveis (sobrepostas)</label>
+          <div style="font-size:9.5px;color:#888;line-height:1.4;margin-bottom:4px">Desligado: o mapa mostra só as melhores composições sem sobreposição. Ligado: mostra TODAS as combinações que passam nos filtros (até 60 por grupo, as de maior score), mesmo que dividam lotes. Clique escolhe a de menor área sob o cursor.</div>
+          <label class="check-row"><input type="checkbox" id="qf-esquina" onchange="atualizarFiltroNumerico()"> Apenas imóveis em esquina</label>
           <div class="fl">Uso do imóvel (cadastro IPTU)</div>
           <label class="check-row"><input type="checkbox" id="qf-uso-comercial" checked onchange="atualizarFiltroNumerico()"> 🏬 Comercial / não residencial</label>
           <label class="check-row"><input type="checkbox" id="qf-uso-misto" checked onchange="atualizarFiltroNumerico()"> 🏘 Misto</label>
@@ -3404,6 +3406,7 @@ function _lerFiltrosMcmv(){
   qfilters.frenteMin = num('qf-frente-min', 0);
   qfilters.regMin = num('qf-reg-min', 0);
   qfilters.encMin = num('qf-enc-min', 0);
+  qfilters.todasComp = !!document.getElementById('qf-todas-comp')?.checked;
   qfilters.soEsquina = !!document.getElementById('qf-esquina')?.checked;
   const usos = ['comercial','misto','residencial','vago'].filter(c => document.getElementById('qf-uso-'+c)?.checked);
   qfilters.usoClasses = usos.length && usos.length < 4 ? new Set(usos) : null;
@@ -3673,10 +3676,12 @@ function _expandirSubsCompacto(q, subs, chave){
   const nMax = Number.isFinite(qfilters.nLotesMax) ? qfilters.nLotesMax : 3;
   const aMin = qfilters.areaMin || 0, aMax = qfilters.areaMax;
   let saida = subs;
-  if (subs.some(s => s.tipo==='ativo' && (s.n > nMax || s.area > aMax))) {
+  const todas = !!qfilters.todasComp;
+  const precisaExpandir = s => s.tipo==='ativo' && (s.n > nMax || s.area > aMax || (todas && s.n > 1));
+  if (subs.some(precisaExpandir)) {
     saida = [];
     subs.forEach(s => {
-      if (s.tipo==='ativo' && (s.n > nMax || s.area > aMax)) {
+      if (precisaExpandir(s)) {
         const novos = _subsPossiveisCompacto(q, s, nMax, aMin, aMax);
         if (novos.length) { novos.forEach(n => saida.push(n)); return; }
       }
@@ -3754,8 +3759,10 @@ function _subsPossiveisCompacto(q, comp, nMax, aMin, aMax){
   const qidBase = q.id.split('-')[0];
   const cands = _candidatasCompacto(q, comp, nMax, aMin, aMax);
   const usados = new Set(), escolhidos = [];
+  const todas = !!qfilters.todasComp;
   cands.forEach(c => {
-    if (c.lotes.some(l => usados.has(l))) return;
+    if (todas) { if (escolhidos.length >= 60) return; }          // modo "todas": sobrepostas permitidas, no máximo 60 por grupo
+    else if (c.lotes.some(l => usados.has(l))) return;
     c.lotes.forEach(l => usados.add(l));
     const sub = _montarSubAtivo(q, qidBase, c.lotes, comp.zona); // score completo (com Terreno × VGV) só nas escolhidas
     escolhidos.push({...sub, subId: `${q.id}~c${c.lotes.join('+')}`, dividido: true, virtual: true, nOriginal: comp.n, areaOriginal: comp.area});
@@ -5383,7 +5390,7 @@ function htmlListaRestricoesLotes(lotes, qidBase, groupId, bairro){
 function abrirPaginaRestricoes(qid, subId){
   const q = QUADRAS.find(x=>x.id===qid); if(!q) return;
   const subs = getSubGroups(q);
-  const stats = subs.find(s=>s.subId===subId) || subs[0];
+  const stats = subs.find(s=>s.subId===subId) || _resolverSubAlternativa(q, subId) || subs[0];
   if (!stats) return;
   const qidBase = qid.split('-')[0];
   document.getElementById('detail').innerHTML = `
@@ -5867,7 +5874,10 @@ async function abrirModalProspeccao(qid, subId, bairroHint){
          || QUADRAS.find(x=>x.id===qid);
   if (!q) return;
   const subs = getSubGroups(q);
-  const sub = subs.find(s=>s.subId===subId) || subs[0];
+  // Composição "alternativa" (virtual, escolhida na lista de alternativas da ficha) pode não estar
+  // em getSubGroups: sem resolvê-la aqui, caía em subs[0] (o grupo inteiro) e a prospecção era
+  // gravada com TODOS os lotes do grupo, pintando as composições vizinhas junto.
+  const sub = subs.find(s=>s.subId===subId) || _resolverSubAlternativa(q, subId) || subs[0];
   if (!sub) return;
 
   _prospeccaoAtual = {q, sub, imagem: null, pipelineFeito: false};
@@ -7342,9 +7352,9 @@ function aplicarPadroesMcmv(ligar){
     const ou = document.getElementById('q-hide-ou');
     if (ou) { if (_mcmvHideOuAlto === null) _mcmvHideOuAlto = ou.checked; ou.checked = false; } // Econômico: não oculta Operação Urbana
     if (_mcmvAreaAlto === null) _mcmvAreaAlto = {min: document.getElementById('qf-area-min')?.value ?? '', max: document.getElementById('qf-area-max')?.value ?? ''};
-    set('qf-camax-min','4'); set('qf-nlotes-max','1'); set('qf-est-raio','500');
-    set('qf-area-min','1200'); set('qf-area-max','1800'); set('qf-frente-min','30'); set('qf-reg-min',''); set('qf-enc-min','');
-    const esq=document.getElementById('qf-esquina'); if(esq) esq.checked=true;
+    set('qf-camax-min','4'); set('qf-nlotes-max','2'); set('qf-est-raio','700');
+    set('qf-area-min','1200'); set('qf-area-max','2000'); set('qf-frente-min','20'); set('qf-reg-min',''); set('qf-enc-min',''); { const tc=document.getElementById('qf-todas-comp'); if(tc) tc.checked=false; }
+    const esq=document.getElementById('qf-esquina'); if(esq) esq.checked=false;
     ['comercial','misto','residencial','vago'].forEach(c=>{ const el=document.getElementById('qf-uso-'+c); if(el) el.checked=true; });
     ['LANCAR','MONITORAR','IGNORAR','SEM_DADO'].forEach(c=>{ const el=document.getElementById('qf-estudo-'+c); if(el) el.checked = (c==='LANCAR'); });
     const r=document.querySelector('input[name="qf-est-modo"][value="todos"]'); if(r) r.checked=true;
@@ -7490,7 +7500,7 @@ function frentePorFaceDeRua(q, lotesFrente){
   return {maior: Math.max(...vals), nFaces: vals.length};
 }
 // ── Confinamento ("encravada"): composição cercada por edifícios/condomínios ──
-// Contra incorporadoras que só olham áreas maiores, um terreno de 1.200–1.800 m² cujos
+// Contra incorporadoras que só olham áreas maiores, um terreno de 1.200–2.000 m² cujos
 // vizinhos já são edifícios/condomínios (que não vão ser remembrados) tem mais chance.
 // Mede, no perímetro que NÃO é rua (laterais e fundos), a fração que encosta em lote
 // "consolidado": condomínio (flag do cadastro), ≥ 5 pavimentos ou coef. de aproveitamento ≥ 2,5.
@@ -7607,7 +7617,7 @@ function scoreMcmvDetalhe(q, area, n, lotes, rapido){
   const estPts = est ? Math.round(est.pts * P.est/25) : 0;
   const zon = Math.round((ZONA_MCMV[q.zona] || 0) * P.zon/10);
   const neg = Math.round(FRACAO_LOTES(n) * P.lotes);
-  const are = janelaScore(Math.round(area), 1200, 1800, 800, 2600, P.area);
+  const are = janelaScore(Math.round(area), 1200, 2000, 800, 2800, P.area);
   const ter = rapido ? {pts:7, incid:null} : incidenciaTerrenoMcmv(q, area, lotes, estudo); // rapido: ranking das candidatas, sem a avaliação por ITBI
   const terPts = Math.round(ter.pts * P.terreno/15);
   const frentePts = at.frente==null ? Math.round(P.frente/2) : Math.round(Math.max(0, Math.min(1, (at.frente-15)/30)) * P.frente);
@@ -7636,7 +7646,7 @@ function htmlScoreMcmv(q, stats){
     scoreBar('Zoneamento ('+q.zona+')', d.zon, PESOS_MCMV.zon),
     scoreBar('Nº de lotes ('+nTxt+')', d.neg, PESOS_MCMV.lotes),
     scoreBar('Terreno × VGV'+(d.ter.incid!=null?' (incidência '+(d.ter.incid*100).toFixed(0)+'% do VGV)':' (sem avaliação)'), d.terPts, PESOS_MCMV.terreno),
-    scoreBar('Área da composição (ideal 1.200–1.800 m²)', d.are, PESOS_MCMV.area),
+    scoreBar('Área da composição (ideal 1.200–2.000 m²)', d.are, PESOS_MCMV.area),
     scoreBar('Regularidade do formato'+(d.reg?' ('+Math.round(d.reg.rect*100)+'% do retângulo envolvente · proporção 1:'+(d.reg.lado1/d.reg.lado2).toFixed(1).replace('.',',')+')':' (sem geometria)'), d.regPts, PESOS_MCMV.regular),
     scoreBar('Frente'+(d.at.frente!=null?' ('+d.at.frente.toLocaleString('pt-BR',{maximumFractionDigits:1})+' m'+(d.at.nFaces>1?' · maior de '+d.at.nFaces+' faces':'')+')':' (sem testada cadastrada)'), d.frentePts, PESOS_MCMV.frente),
     scoreBar('Imóvel em esquina'+(d.at.esquina?' (sim)':' (não)'), d.esquinaPts, PESOS_MCMV.esquina),
@@ -8163,7 +8173,7 @@ function atualizarContadorVinculo(){
 function _subCompletoPorId(subId, bairro){
   const q = QUADRAS.find(x => x.id === subId.split('~')[0] && x.bairro === bairro);
   if (!q) return null;
-  return getSubGroups(q).find(s => s.subId === subId) || null;
+  return getSubGroups(q).find(s => s.subId === subId) || _resolverSubAlternativa(q, subId) || null;
 }
 // Se alguma composição do vínculo já estava em prospecção / validação com
 // o Ale / baixa prioridade ANTES de virar vínculo, propaga esse status
@@ -8202,7 +8212,7 @@ async function concluirModoVinculo(){
   function _lotesAtuaisDoSub(subId, bairro){
     const q = QUADRAS.find(x => x.id === subId.split('~')[0] && x.bairro === bairro);
     if (!q) return [];
-    const sub = getSubGroups(q).find(s => s.subId === subId);
+    const sub = getSubGroups(q).find(s => s.subId === subId) || _resolverSubAlternativa(q, subId);
     return sub ? sub.lotes : [];
   }
   const todosMembros = [
@@ -8343,7 +8353,8 @@ function _renderUmaQuadra(q){
     // geométrica real dos lotes que o compõem — sem costuras internas e
     // sem aproximação por envoltória convexa)
     const qidBase = q.id.split('-')[0];
-    subs.forEach(sub=>{
+    const subsDesenho = qfilters.todasComp && currentProfile==='compacto' ? subs.slice().sort((a,b)=>b.area-a.area) : subs; // sobrepostas: menores por cima
+    subsDesenho.forEach(sub=>{
       if (!subPassaFiltrosNumericos(q, sub)) return;
       const restrito = sub.tipo==='restrito' && sub.statusRestricao!=='retirado_prospeccao';
       const corBaseAtivo = temEmpreendimentoSobreposto(qidBase, sub.lotes) ? COR_EMPREENDIMENTO_SOBREPOSTO : corDisponivelPorCA(sub.zona || q.zona, q.ou, qidBase, sub.lotes);
@@ -8353,6 +8364,8 @@ function _renderUmaQuadra(q){
       const latlngs = geoJSONToLatLngs(unioned);
       if (!latlngs.length) return;
       const style={ color:c, weight:sel?2.5:1.5, fillColor:c, fillOpacity: restrito?(sel?0.45:0.25):(sel?0.55:0.3), dashArray: restrito?'4,2':(sel?null:'3,2') };
+      // modo "todas": composição que divide lote com outra já em prospecção (sem estar inteira dentro dela) fica esmaecida
+      if (qfilters.todasComp && c !== COR_PROSPECCAO && !restrito && sub.lotes.some(l => prospeccoesComLote(qidBase, l).length)) { style.fillOpacity = 0.1; style.dashArray = '1,4'; }
       const layer = L.polygon(latlngs, style);
       layer._yunyTipo = 'poligono';
       layer._yunySubId = sub.subId;
